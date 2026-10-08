@@ -1,0 +1,19 @@
+{
+  "name": "STAR TO RECORD",
+  "short_name": "STAR TO RECORD",
+  "description": "追星記帳本：買賣小卡專輯、預購代購、演唱會花費，資料存進 Google 試算表",
+  "lang": "zh-Hant",
+  "dir": "ltr",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#faf7f5",
+  "theme_color": "#faf7f5",
+  "categories": ["finance", "lifestyle"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

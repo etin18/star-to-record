@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>STAR TO RECORD</title>
+<meta name="description" content="追星記帳本：買賣小卡專輯、預購代購、演唱會花費，資料存進自己的 Google 試算表">
+<meta name="theme-color" id="theme-color" content="#faf7f5">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="STAR TO RECORD">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="app.css">
+<script>
+/* 主題要在畫面畫出來之前決定，否則會先閃一下淺色。
+   photo（粉紫、自訂背景）的底圖與字色由 app.js 接手設定。 */
+(function () {
+  try {
+    var pref = localStorage.getItem('sl.theme') || 'light';
+    var root = document.documentElement;
+    if (pref === 'glow' || pref === 'custom') {
+      root.dataset.theme = 'photo';
+      root.dataset.tone = 'dark';
+      return;
+    }
+    var dark = pref === 'dark' || (pref === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+    root.dataset.theme = dark ? 'dark' : 'light';
+  } catch (e) {
+    document.documentElement.dataset.theme = 'light';
+  }
+})();
+</script>
+</head>
+<body>
+<div class="bg"></div><div class="dim"></div>
+<div class="app">
+  <header class="top">
+    <h1 id="title">STAR TO RECORD</h1>
+    <span class="sync" id="sync"></span>
+    <button class="ico" id="btn-eye" aria-label="遮住金額"></button>
+    <button class="ico" id="btn-gear" aria-label="設定"></button>
+  </header>
+  <main id="view"></main>
+  <nav class="tabs" id="tabs"></nav>
+</div>
+<div id="sheets"></div>
+<script src="calc.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

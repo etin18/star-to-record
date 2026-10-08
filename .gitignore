@@ -1,0 +1,7 @@
+shots/
+node_modules/
+.DS_Store
+www/_local*
+scripts/*.local.*
+開發筆記*
+*.local.json
