@@ -23,7 +23,7 @@
 var SECRET = '';   // ← 改成你自己的通關密語
 
 /** 後端版本。App 設定頁會跟自己的版本並排顯示，用來確認有沒有真的重新部署。 */
-var API_VERSION = 'v1';
+var API_VERSION = 'v2';
 
 /* ==========================================================================
    資料表定義：欄位順序＝試算表欄位順序
@@ -103,7 +103,9 @@ var SHEETS = {
       { key: 'arrivedDate', header: '到貨日', type: 'date' },
       { key: 'expectedMonth', header: '預計到貨', type: 'text' },
       { key: 'note', header: '備註', type: 'text', width: 200 },
-      { key: 'createdAt', header: '建立時間', type: 'text' }
+      { key: 'createdAt', header: '建立時間', type: 'text' },
+      // 照片編號，逗號隔開。照片本體只存在手機裡，這裡只讓別支手機知道「這張單有照片」
+      { key: 'photoIds', header: '照片', type: 'text', width: 200 }
     ]
   },
   buyItems: {
@@ -154,7 +156,8 @@ var SHEETS = {
       { key: 'shipMethod', header: '寄送方式', type: 'text' },
       { key: 'shipStatus', header: '寄送狀態', type: 'text' },
       { key: 'note', header: '備註', type: 'text', width: 200 },
-      { key: 'createdAt', header: '建立時間', type: 'text' }
+      { key: 'createdAt', header: '建立時間', type: 'text' },
+      { key: 'photoIds', header: '照片', type: 'text', width: 200 }
     ]
   },
   expenses: {
@@ -169,7 +172,8 @@ var SHEETS = {
       { key: 'groupId', header: '團id', type: 'text', width: 250 },
       { key: 'memberId', header: '成員id', type: 'text', width: 250 },
       { key: 'note', header: '備註', type: 'text', width: 200 },
-      { key: 'createdAt', header: '建立時間', type: 'text' }
+      { key: 'createdAt', header: '建立時間', type: 'text' },
+      { key: 'photoIds', header: '照片', type: 'text', width: 200 }
     ]
   }
 };
@@ -299,8 +303,27 @@ function getSheet(entity) {
         sheet.getRange(2, idx + 1, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat('@');
       }
     });
+  } else {
+    ensureColumns(sheet, config);
   }
   return sheet;
+}
+
+/**
+ * 後來新增的欄位（例如「照片」）補到既有分頁的最後面。
+ * 新欄位一律加在最後，所以舊資料的欄位順序不會亂。
+ */
+function ensureColumns(sheet, config) {
+  var have = sheet.getLastColumn();
+  if (have >= config.fields.length) return;
+  for (var i = have; i < config.fields.length; i++) {
+    var f = config.fields[i];
+    sheet.getRange(1, i + 1).setValue(f.header).setFontWeight('bold');
+    if (f.width) sheet.setColumnWidth(i + 1, f.width);
+    if (f.type === 'date' || f.type === 'text') {
+      sheet.getRange(2, i + 1, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat('@');
+    }
+  }
 }
 
 function listRows(entity) {

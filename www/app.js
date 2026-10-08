@@ -8,7 +8,8 @@
 'use strict';
 
 const C = window.Calc;
-const FRONT_VERSION = 'v1';
+const FRONT_VERSION = 'v2';
+const BACKEND_NEEDED = 2;   // 前端需要的最低後端版本（v2 起試算表多一欄「照片」）
 const ENTITIES = ['groups', 'members', 'releases', 'accounts', 'parties', 'options', 'buys', 'buyItems', 'buyFees', 'sells', 'expenses'];
 const FLAGS = ['多帶', '重複', '自留'];
 const PAY_BUY = ['匯款', '貨付', '刷卡', '現金'];
@@ -93,6 +94,8 @@ function put(entity, rec) {
   return rec;
 }
 function del(entity, id) {
+  const old = state.data[entity].find((r) => r.id === id);
+  if (old && old.photoIds) dropPhotos(C.list(old.photoIds)).then(refreshPhotoStats);
   state.data[entity] = state.data[entity].filter((r) => r.id !== id);
   state.outbox.push({ action: 'remove', entity, id });
   saveLocal(); flush();
@@ -109,6 +112,8 @@ function putBuy(buy, items, fees) {
   saveLocal(); flush();
 }
 function delBuy(id) {
+  const old = state.data.buys.find((b) => b.id === id);
+  if (old && old.photoIds) dropPhotos(C.list(old.photoIds)).then(refreshPhotoStats);
   state.data.buys = state.data.buys.filter((b) => b.id !== id);
   state.data.buyItems = state.data.buyItems.filter((i) => i.buyId !== id);
   state.data.buyFees = state.data.buyFees.filter((f) => f.buyId !== id);
@@ -342,6 +347,380 @@ async function importBackground(file) {
   } finally { URL.revokeObjectURL(url); }
 }
 
+
+/* ==========================================================================
+   照片：IndexedDB（只存在這支手機）
+   每張單可以有好幾張照片。紀錄上只記照片編號（photoIds，逗號隔開），
+   照片本體在這裡，所以換手機要靠「匯出照片和資料」帶走。
+   ========================================================================== */
+const PhotoDB = (() => {
+  let dbPromise = null;
+  function open() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open('sl-photos', 1);
+      req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains('photos')) req.result.createObjectStore('photos'); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return dbPromise;
+  }
+  async function tx(mode, fn) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const t = db.transaction('photos', mode);
+      const req = fn(t.objectStore('photos'));
+      t.oncomplete = () => resolve(req && req.result);
+      t.onerror = () => reject(t.error);
+    });
+  }
+  return {
+    get: (id) => tx('readonly', (st) => st.get(id)),
+    put: (id, value) => tx('readwrite', (st) => st.put(value, id)),
+    remove: (id) => tx('readwrite', (st) => st.delete(id)),
+    clear: () => tx('readwrite', (st) => st.clear()),
+    async all() {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const out = [];
+        const req = db.transaction('photos', 'readonly').objectStore('photos').openCursor();
+        req.onsuccess = () => { const cur = req.result; if (!cur) return resolve(out); out.push({ id: cur.key, value: cur.value }); cur.continue(); };
+        req.onerror = () => reject(req.error);
+      });
+    }
+  };
+})();
+
+/** 縮到指定邊長後轉 JPEG，手機直接拍的大圖不會塞爆本機空間 */
+async function compressImage(file, maxSide, quality) {
+  let bitmap;
+  try { bitmap = await createImageBitmap(file); }
+  catch (e) {
+    bitmap = await new Promise((res, rej) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); res(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('無法讀取圖片')); };
+      img.src = url;
+    });
+  }
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  if (bitmap.close) bitmap.close();
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+}
+
+const thumbUrls = new Map();     // 照片編號 → 縮圖網址
+const missingPhotos = new Set(); // 這支手機上找不到的（在別支手機）
+let fullUrl = null;              // 大圖檢視器目前那張，換張或關掉要釋放
+
+/** 畫面上所有 <img data-thumb> 補上圖；找不到的標成「在別支手機」 */
+async function hydratePhotos() {
+  for (const img of document.querySelectorAll('img[data-thumb]')) {
+    const id = img.dataset.thumb;
+    if (thumbUrls.has(id)) { img.src = thumbUrls.get(id); continue; }
+    if (missingPhotos.has(id)) { markMissing(img); continue; }
+    const rec = await PhotoDB.get(id);
+    if (!rec) { missingPhotos.add(id); markMissing(img); continue; }
+    const url = URL.createObjectURL(rec.thumb || rec.full);
+    thumbUrls.set(id, url);
+    if (img.isConnected) img.src = url;
+  }
+  for (const img of document.querySelectorAll('img[data-full]')) {
+    const rec = await PhotoDB.get(img.dataset.full);
+    if (!rec) { img.replaceWith(Object.assign(document.createElement('p'), { className: 'hint', textContent: '這張照片在別支手機，匯入備份檔就會出現' })); continue; }
+    if (fullUrl) URL.revokeObjectURL(fullUrl);
+    fullUrl = URL.createObjectURL(rec.full || rec.thumb);
+    if (img.isConnected) img.src = fullUrl;
+  }
+}
+function markMissing(img) {
+  const b = img.closest('.thumb');
+  if (b) { b.classList.add('missing'); b.textContent = '在別支手機'; }
+}
+function forgetPhoto(id) {
+  const url = thumbUrls.get(id);
+  if (url) URL.revokeObjectURL(url);
+  thumbUrls.delete(id);
+  missingPhotos.delete(id);
+}
+async function dropPhotos(ids) {
+  for (const id of ids) { try { await PhotoDB.remove(id); } catch (e) { /* 本來就不在 */ } forgetPhoto(id); }
+}
+
+/* ---------- 設定頁的照片統計 ---------- */
+const photoStats = { count: 0, bytes: 0, missing: 0 };
+async function refreshPhotoStats() {
+  try {
+    const all = await PhotoDB.all();
+    photoStats.count = all.length;
+    photoStats.bytes = all.reduce((n, p) => n + ((p.value.full && p.value.full.size) || 0) + ((p.value.thumb && p.value.thumb.size) || 0), 0);
+    const have = new Set(all.map((p) => p.id));
+    const wanted = new Set();
+    ['buys', 'sells', 'expenses'].forEach((e) => state.data[e].forEach((r) => C.list(r.photoIds).forEach((id) => wanted.add(id))));
+    photoStats.missing = [...wanted].filter((id) => !have.has(id)).length;
+  } catch (e) { /* 私密瀏覽等沒有 IndexedDB 的情況 */ }
+  if (sheets.some((x) => x.id === 'settings')) refreshSheets();
+}
+const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
+
+/* ==========================================================================
+   ZIP（store 模式，不壓縮）
+   照片搬家用的容器。JPEG 已經壓過了，再 deflate 只是白費 CPU，所以一律 store；
+   自己寫這幾十行，就不必為了換手機引進外部函式庫。
+   ========================================================================== */
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[i] = c >>> 0; }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+/** zip 沿用 1980 年代的 MS-DOS 時間格式：日期時間各擠在 16 bits 裡 */
+function dosDateTime(d) {
+  return { time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1), date: ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate() };
+}
+/** entries: [{ name, blob }] → zip Blob。檔名一律 ASCII（UUID、manifest.json、data.json），免得踩編碼旗標的坑 */
+async function makeZip(entries) {
+  const enc = new TextEncoder();
+  const { time, date } = dosDateTime(new Date());
+  const parts = [], central = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = enc.encode(e.name);
+    const bytes = new Uint8Array(await e.blob.arrayBuffer());
+    const crc = crc32(bytes);
+    const size = bytes.length;
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true); local.setUint16(4, 20, true); local.setUint16(6, 0, true); local.setUint16(8, 0, true);
+    local.setUint16(10, time, true); local.setUint16(12, date, true); local.setUint32(14, crc, true);
+    local.setUint32(18, size, true); local.setUint32(22, size, true); local.setUint16(26, name.length, true); local.setUint16(28, 0, true);
+    parts.push(local.buffer, name, e.blob);
+    const cd = new DataView(new ArrayBuffer(46));
+    cd.setUint32(0, 0x02014b50, true); cd.setUint16(4, 20, true); cd.setUint16(6, 20, true); cd.setUint16(8, 0, true); cd.setUint16(10, 0, true);
+    cd.setUint16(12, time, true); cd.setUint16(14, date, true); cd.setUint32(16, crc, true);
+    cd.setUint32(20, size, true); cd.setUint32(24, size, true); cd.setUint16(28, name.length, true); cd.setUint32(42, offset, true);
+    central.push(cd.buffer, name);
+    offset += 30 + name.length + size;
+  }
+  const cdSize = central.reduce((n, b) => n + b.byteLength, 0);
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true); eocd.setUint16(8, entries.length, true); eocd.setUint16(10, entries.length, true);
+  eocd.setUint32(12, cdSize, true); eocd.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, eocd.buffer], { type: 'application/zip' });
+}
+async function inflateRaw(blob) {
+  if (typeof DecompressionStream === 'undefined') throw new Error('這個瀏覽器無法解開壓縮過的 zip，請用原本匯出的檔案');
+  return new Response(blob.stream().pipeThrough(new DecompressionStream('deflate-raw'))).blob();
+}
+/** 解 zip → Map<檔名, Blob>。從中央目錄讀而不是掃檔頭，別人用電腦重新壓過的檔也吃得下 */
+async function readZip(blob) {
+  const tailSize = Math.min(blob.size, 65557);
+  const tail = new DataView(await blob.slice(blob.size - tailSize).arrayBuffer());
+  let eocd = -1;
+  for (let i = tail.byteLength - 22; i >= 0; i--) if (tail.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error('這不是有效的 zip 檔');
+  const count = tail.getUint16(eocd + 10, true);
+  const cdSize = tail.getUint32(eocd + 12, true);
+  const cdOffset = tail.getUint32(eocd + 16, true);
+  const cd = new DataView(await blob.slice(cdOffset, cdOffset + cdSize).arrayBuffer());
+  const dec = new TextDecoder();
+  const out = new Map();
+  let p = 0;
+  for (let i = 0; i < count; i++) {
+    if (p + 46 > cd.byteLength || cd.getUint32(p, true) !== 0x02014b50) break;
+    const method = cd.getUint16(p + 10, true);
+    const size = cd.getUint32(p + 20, true);
+    const nameLen = cd.getUint16(p + 28, true), extraLen = cd.getUint16(p + 30, true), commentLen = cd.getUint16(p + 32, true);
+    const localOffset = cd.getUint32(p + 42, true);
+    const name = dec.decode(new Uint8Array(cd.buffer, p + 46, nameLen));
+    p += 46 + nameLen + extraLen + commentLen;
+    if (name.endsWith('/')) continue;
+    const lh = new DataView(await blob.slice(localOffset, localOffset + 30).arrayBuffer());
+    const start = localOffset + 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
+    const data = blob.slice(start, start + size);
+    if (method === 0) out.set(name, data);
+    else if (method === 8) out.set(name, await inflateRaw(data));
+    else throw new Error(`不支援的壓縮方式（${method}）`);
+  }
+  return out;
+}
+
+/* ==========================================================================
+   照片和資料打包（換手機、備份）
+   zip 裡有：photos/<照片編號>.jpg（與 .thumb.jpg）、data.json（所有紀錄）、manifest.json（人看的對照表）
+   匯入是「合併」不是取代：這支手機已經有的紀錄和照片都留著，只補上沒有的。
+   ========================================================================== */
+const BACKUP_VERSION = 1;
+const asJpeg = (b) => (b.type === 'image/jpeg' ? b : b.slice(0, b.size, 'image/jpeg'));
+
+function downloadBlob(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+async function exportBackup() {
+  const btn = $('[data-export]');
+  if (btn) { btn.disabled = true; btn.textContent = '打包中…'; }
+  try {
+    const photos = (await PhotoDB.all()).filter((p) => p.value);
+    const owners = {};
+    [['buys', 'buy'], ['sells', 'sell'], ['expenses', 'expense']].forEach(([e, kind]) => state.data[e].forEach((r) => C.list(r.photoIds).forEach((id) => { owners[id] = { kind, r }; })));
+
+    const entries = [];
+    const items = [];
+    for (const { id, value } of photos) {
+      if (value.full) entries.push({ name: `photos/${id}.jpg`, blob: value.full });
+      if (value.thumb) entries.push({ name: `photos/${id}.thumb.jpg`, blob: value.thumb });
+      const o = owners[id];
+      items.push({ id, kind: o ? o.kind : '', ownerId: o ? o.r.id : '', date: o ? o.r.date : '', who: o ? (o.r.partyName || o.r.content || '') : '' });
+    }
+    const json = (o) => new Blob([JSON.stringify(o, null, 2)], { type: 'application/json' });
+    entries.push({ name: 'data.json', blob: json({ app: 'star-to-record', version: BACKUP_VERSION, exportedAt: new Date().toISOString(), data: state.data }) });
+    // 對照表：萬一哪天試算表出事，光看這個檔也知道哪張照片是哪張單的
+    entries.push({ name: 'manifest.json', blob: json({ app: 'star-to-record', version: BACKUP_VERSION, exportedAt: new Date().toISOString(), photoCount: items.length, photos: items }) });
+
+    downloadBlob(`STAR-TO-RECORD_備份_${todayStr()}.zip`, await makeZip(entries));
+    toast(`已匯出 ${items.length} 張照片和全部資料`);
+  } catch (err) {
+    toast(`匯出失敗：${err.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '匯出照片和資料'; }
+  }
+}
+
+async function importBackup(file) {
+  const btn = $('[data-import]');
+  if (btn) { btn.disabled = true; btn.textContent = '匯入中…'; }
+  try {
+    const files = await readZip(file);
+    // 只認檔名不管路徑：別人用電腦解開再壓、多包一層資料夾也還原得回來
+    const byName = new Map();
+    for (const [path, blob] of files) {
+      if (path.startsWith('__MACOSX/')) continue;
+      const base = path.split('/').pop();
+      if (base) byName.set(base, blob);
+    }
+
+    // --- 照片 ---
+    const ids = new Set();
+    for (const base of byName.keys()) { const m = base.match(/^(.+?)(\.thumb)?\.jpg$/i); if (m) ids.add(m[1]); }
+    let photosAdded = 0;
+    for (const id of ids) {
+      let full = byName.get(`${id}.jpg`);
+      let thumb = byName.get(`${id}.thumb.jpg`);
+      if (!full && !thumb) continue;
+      if (full) full = asJpeg(full);
+      if (thumb) thumb = asJpeg(thumb);
+      if (!thumb) thumb = await compressImage(full, 240, 0.7);
+      await PhotoDB.put(id, { full: full || thumb, thumb });
+      forgetPhoto(id);
+      photosAdded++;
+    }
+
+    // --- 資料：以 id 合併，這支手機已經有的紀錄不動 ---
+    let recordsAdded = 0;
+    const dj = byName.get('data.json');
+    if (dj) {
+      const incoming = (JSON.parse(await dj.text()).data) || {};
+      const have = {};
+      ENTITIES.forEach((e) => { have[e] = new Set(state.data[e].map((r) => r.id)); });
+      const newBuys = new Map();
+      (incoming.buys || []).forEach((b) => { if (b && b.id && !have.buys.has(b.id)) { state.data.buys.push(b); newBuys.set(b.id, { buy: b, items: [], fees: [] }); recordsAdded++; } });
+      (incoming.buyItems || []).forEach((i) => { if (newBuys.has(i.buyId) && !have.buyItems.has(i.id)) { state.data.buyItems.push(i); newBuys.get(i.buyId).items.push(i); } });
+      (incoming.buyFees || []).forEach((f) => { if (newBuys.has(f.buyId) && !have.buyFees.has(f.id)) { state.data.buyFees.push(f); newBuys.get(f.buyId).fees.push(f); } });
+      newBuys.forEach(({ buy, items, fees }) => state.outbox.push({ action: 'saveBuy', buy, items, fees }));
+      ['groups', 'members', 'releases', 'accounts', 'parties', 'options', 'sells', 'expenses'].forEach((e) => {
+        (incoming[e] || []).forEach((r) => {
+          if (!r || !r.id || have[e].has(r.id)) return;
+          state.data[e].push(r); recordsAdded++;
+          state.outbox.push({ action: 'save', entity: e, record: r });
+        });
+      });
+      saveLocal(); flush();
+    }
+
+    if (!photosAdded && !recordsAdded) throw new Error('檔案裡沒有可以匯入的東西（或這支手機都已經有了）');
+    missingPhotos.clear();
+    render();
+    refreshPhotoStats();
+    toast(`已匯入 ${photosAdded} 張照片、${recordsAdded} 筆新紀錄`);
+  } catch (err) {
+    toast(`匯入失敗：${err.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '匯入'; }
+  }
+}
+
+/* ---------- 表單上的照片 ---------- */
+const photoHolder = () => (form.kind === 'buy' ? form.model.buy : form.model);
+
+async function addPhotos(files) {
+  const h = photoHolder();
+  form.added = form.added || [];
+  let n = 0;
+  for (const file of Array.from(files).slice(0, 10)) {
+    try {
+      const [full, thumb] = await Promise.all([compressImage(file, 1600, 0.8), compressImage(file, 240, 0.7)]);
+      const id = uid();
+      await PhotoDB.put(id, { full, thumb, kind: form.kind, createdAt: new Date().toISOString() });
+      h.photoIds = C.list(h.photoIds).concat(id).join(',');
+      form.added.push(id);
+      n++;
+    } catch (e) { toast('有一張照片打不開，換一張試試'); }
+  }
+  if (n) { refreshForm(); refreshPhotoStats(); }
+}
+function removePhoto(id) {
+  const h = photoHolder();
+  h.photoIds = C.list(h.photoIds).filter((x) => x !== id).join(',');
+  form.removed = form.removed || [];
+  form.added = form.added || [];
+  if (form.added.includes(id)) { form.added = form.added.filter((x) => x !== id); dropPhotos([id]).then(refreshPhotoStats); }
+  else form.removed.push(id);    // 原本就在單上的，等按「存起來」才真的刪，取消就還在
+  refreshForm();
+}
+/** 表單結束時整理照片：存了就刪掉「被移除」的，取消就刪掉「這次新加」的 */
+function settlePhotos(saved) {
+  if (!form) return;
+  const drop = saved ? form.removed : form.added;
+  if (drop && drop.length) dropPhotos(drop).then(refreshPhotoStats);
+  form.added = []; form.removed = [];
+}
+const photoIdsOf = (rec) => C.list(rec && rec.photoIds);
+
+function thumbBtn(ids, i, removable) {
+  return `<div class="thumb-wrap"><button class="thumb" data-pv="${ids.join(',')}" data-pvi="${i}" aria-label="看大圖"><img data-thumb="${ids[i]}" alt=""></button>${removable ? `<button class="thumb-x" data-del-photo="${ids[i]}" aria-label="移除這張照片">✕</button>` : ''}</div>`;
+}
+function photoCard() {
+  const ids = C.list(photoHolder().photoIds);
+  return `<div class="card"><h3>照片 <small class="hint">只存在這支手機</small></h3><div class="thumbs">${ids.map((_, i) => thumbBtn(ids, i, true)).join('')}<button class="thumb add" data-add-photo aria-label="加照片">＋</button></div></div>`;
+}
+function photoStrip(rec) {
+  const ids = photoIdsOf(rec);
+  return ids.length ? `<div class="card"><h3>照片 <span class="badge" style="background:var(--muted)">${ids.length}</span></h3><div class="thumbs">${ids.map((_, i) => thumbBtn(ids, i, false)).join('')}</div></div>` : '';
+}
+
+/* ---------- 大圖檢視器 ---------- */
+const viewer = { ids: [], i: 0 };
+function viewerHtml() {
+  const n = viewer.ids.length;
+  return `<div class="viewer">
+    <div class="viewer-top"><button class="link" data-close>關閉</button><span>${viewer.i + 1} / ${n}</span><span style="min-width:52px"></span></div>
+    <div class="viewer-img"><img data-full="${viewer.ids[viewer.i]}" alt=""></div>
+    ${n > 1 ? `<div class="viewer-nav"><button class="btn ghost" data-pv-step="-1">‹ 上一張</button><button class="btn ghost" data-pv-step="1">下一張 ›</button></div>` : ''}
+  </div>`;
+}
+
 /* ==========================================================================
    畫面：骨架
    ========================================================================== */
@@ -418,13 +797,14 @@ function histRow(kind, r) {
     const flagged = items.some((i) => C.list(i.flags).includes('多帶'));
     const dim = C.isCancelled(r);
     const sub = `${mmdd(r.date)} · ${items.length} 項${r.arrival === '已到' ? ' · 已到貨' : r.arrival === '已取消' ? ' · 已取消' : ''}${r.paidDate ? '' : ' · 未付'}`;
-    return `<div class="item" data-act="buy" data-id="${r.id}" style="${dim ? 'opacity:.5' : ''}">${head}<div class="main">${label}<div class="t">${esc(buyLabel(r))}</div><div class="s">${esc(sub)} ${flagged ? '<span class="tag warn">多帶</span>' : ''}</div></div><div class="amt out">${money(-buyTotal(r))}</div></div>`;
+    return `<div class="item" data-act="buy" data-id="${r.id}" style="${dim ? 'opacity:.5' : ''}">${head}<div class="main">${label}<div class="t">${esc(buyLabel(r))}</div><div class="s">${esc(sub)} ${flagged ? '<span class="tag warn">多帶</span>' : ''}${photoTag(r)}</div></div><div class="amt out">${money(-buyTotal(r))}</div></div>`;
   }
   if (kind === 'sell') {
-    return `<div class="item" data-act="sell" data-id="${r.id}">${head}<div class="main">${label}<div class="t">${esc(r.partyName || '（未填買家）')}${r.content ? ' · ' + esc(r.content) : ''}</div><div class="s">${mmdd(r.date)} · ${r.paidDate ? '已收款' : '未收款'} · ${esc(r.shipStatus || '')}</div></div><div class="amt in">${money(r.amount, true)}</div></div>`;
+    return `<div class="item" data-act="sell" data-id="${r.id}">${head}<div class="main">${label}<div class="t">${esc(r.partyName || '（未填買家）')}${r.content ? ' · ' + esc(r.content) : ''}</div><div class="s">${mmdd(r.date)} · ${r.paidDate ? '已收款' : '未收款'} · ${esc(r.shipStatus || '')}${photoTag(r)}</div></div><div class="amt in">${money(r.amount, true)}</div></div>`;
   }
-  return `<div class="item" data-act="expense" data-id="${r.id}">${head}<div class="main">${label}<div class="t">${esc(r.category || '')}${r.content ? ' · ' + esc(r.content) : ''}</div><div class="s">${mmdd(r.date)}${r.groupId ? ' · ' + esc(nameOf('groups', r.groupId)) : ''}</div></div><div class="amt out">${money(-r.amount)}</div></div>`;
+  return `<div class="item" data-act="expense" data-id="${r.id}">${head}<div class="main">${label}<div class="t">${esc(r.category || '')}${r.content ? ' · ' + esc(r.content) : ''}</div><div class="s">${mmdd(r.date)}${r.groupId ? ' · ' + esc(nameOf('groups', r.groupId)) : ''}${photoTag(r)}</div></div><div class="amt out">${money(-r.amount)}</div></div>`;
 }
+const photoTag = (r) => (C.list(r.photoIds).length ? ` <span class="tag">照片 ${C.list(r.photoIds).length}</span>` : '');
 
 /* ==========================================================================
    記一筆
@@ -591,6 +971,7 @@ function refreshSheets() {
   const scrolls = Array.from(host.querySelectorAll('.sheet-body')).map((e) => e.scrollTop);
   host.innerHTML = sheets.map((s) => `<div class="sheet" data-sheet="${s.id}">${s.render()}</div>`).join('');
   host.querySelectorAll('.sheet-body').forEach((e, i) => { e.scrollTop = scrolls[i] || 0; });
+  hydratePhotos();
   if (key) {
     const again = host.querySelector(`[data-path="${key}"]`);
     if (again) { again.focus(); try { again.setSelectionRange(caret, caret); } catch (e) { /* 不是文字欄位 */ } }
@@ -691,7 +1072,7 @@ const optionList = (kind) => opts(kind).map((o) => [o.id, o.name]);
 function newBuy() {
   const last = state.data.buys.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
   return {
-    buy: { id: '', date: todayStr(), partyId: '', partyName: '', payMethod: '匯款', accountId: '', paidDate: '', currency: 'TWD', paidTwd: '', pending: false, arrival: '未到', arrivedDate: '', expectedMonth: '', note: '' },
+    buy: { id: '', date: todayStr(), partyId: '', partyName: '', payMethod: '匯款', accountId: '', paidDate: '', currency: 'TWD', paidTwd: '', pending: false, arrival: '未到', arrivedDate: '', expectedMonth: '', note: '', photoIds: '' },
     items: [emptyItem(last ? buyParts(last.id).items[0] : null)],
     fees: []
   };
@@ -786,6 +1167,7 @@ function buyFormHtml() {
         <button class="btn ghost small" data-add-fee style="margin-top:6px">＋ 新增費用</button>
       </div>
 
+      ${photoCard()}
       <div class="card"><div class="field col"><label>備註</label><textarea data-path="buy.note" rows="2">${esc(m.buy.note)}</textarea></div></div>
       <button class="btn" data-save>${saveLabel()}</button>
       ${form.editing ? `<button class="btn danger" data-delete>刪除這張買單</button>` : ''}
@@ -815,7 +1197,7 @@ function itemHtml(it, i) {
 
 /* ---------- 賣單、花費表單 ---------- */
 function newSell() {
-  return { id: '', date: todayStr(), partyId: '', partyName: '', content: '', groupId: '', memberIds: '', amount: '', payMethod: '匯款', accountId: '', paidDate: '', shipMethod: '', shipStatus: '未寄', note: '' };
+  return { id: '', date: todayStr(), partyId: '', partyName: '', content: '', groupId: '', memberIds: '', amount: '', payMethod: '匯款', accountId: '', paidDate: '', shipMethod: '', shipStatus: '未寄', note: '', photoIds: '' };
 }
 function sellFormHtml() {
   const m = form.model;
@@ -834,13 +1216,14 @@ function sellFormHtml() {
         ${fSelect('寄送方式', 'shipMethod', optionList('ship'), '（不指定）', 'ship')}
         ${fSelect('寄送狀態', 'shipStatus', SHIP_STATUS.map((x) => [x, x]))}
       </div>
+      ${photoCard()}
       <div class="card"><div class="field col"><label>備註</label><textarea data-path="note" rows="2">${esc(m.note)}</textarea></div></div>
       <button class="btn" data-save>存起來</button>
       ${form.editing ? `<button class="btn danger" data-delete>刪除這張賣單</button>` : ''}
     </div>`;
 }
 
-function newExpense() { return { id: '', date: todayStr(), category: '', content: '', amount: '', accountId: '', groupId: '', memberId: '', note: '' }; }
+function newExpense() { return { id: '', date: todayStr(), category: '', content: '', amount: '', accountId: '', groupId: '', memberId: '', note: '', photoIds: '' }; }
 function expenseFormHtml() {
   const m = form.model;
   return `
@@ -855,6 +1238,7 @@ function expenseFormHtml() {
         ${fSelect('團', 'groupId', state.data.groups.map((g) => [g.id, g.name]), '（不指定）', 'group')}
         ${m.groupId ? fSelect('成員', 'memberId', membersOf(m.groupId).map((mm) => [mm.id, mm.name]), '（不指定）') : ''}
       </div>
+      ${photoCard()}
       <div class="card"><div class="field col"><label>備註</label><textarea data-path="note" rows="2">${esc(m.note)}</textarea></div></div>
       <button class="btn" data-save>存起來</button>
       ${form.editing ? `<button class="btn danger" data-delete>刪除這筆花費</button>` : ''}
@@ -928,6 +1312,7 @@ function saveForm() {
   } else {
     put('expenses', Object.assign({}, m, { amount: C.num(m.amount) }));
   }
+  settlePhotos(true);
   if (form.inline) { drafts[form.kind] = null; $('#view').scrollTop = 0; } else closeSheet('form');
   form = null;
   render();
@@ -955,6 +1340,7 @@ function detailBuy(id) {
         ${b.note ? `<div class="field col"><span>備註</span><span>${esc(b.note)}</span></div>` : ''}
       </div>
       <div class="card"><h3>品項</h3>${items.map((i) => `<div class="item" style="cursor:default"><div class="main"><div class="t">${esc(i.name || '（未命名）')}</div><div class="s">${C.list(i.flags).map((f) => `<span class="tag warn">${f}</span>`).join('')}${i.cancelled ? '<span class="tag">已取消</span>' : ''}${esc([nameOf('groups', i.groupId), nameOf('releases', i.releaseId), optionName(i.channelId), memberNames(i)].filter(Boolean).join(' · '))}</div></div><div class="amt">${foreign(C.itemTotal(i), cur)}</div></div>`).join('')}</div>
+      ${photoStrip(b)}
       ${fees.length ? `<div class="card"><h3>費用</h3>${fees.map((f) => `<div class="item" style="cursor:default"><div class="main"><div class="t">${esc(f.kind)} ${f.paid ? '' : '<span class="tag warn">未付</span>'}</div><div class="s">${esc(f.note || '')}</div></div><div class="amt">${f.amount ? money(f.amount) : '？'}</div>${f.paid ? '' : `<button class="btn small" data-fee-paid="${f.id}">已付</button>`}</div>`).join('')}</div>` : ''}
       <div class="btn-row">
         ${!b.paidDate && b.payMethod !== '貨付' ? '<button class="btn" data-quick="paid">標示已付款</button>' : ''}
@@ -982,6 +1368,7 @@ function detailSell(id) {
         <div class="field"><span>寄送</span><span>${esc(s.shipMethod || '')} · ${esc(s.shipStatus || '')}</span></div>
         ${s.note ? `<div class="field col"><span>備註</span><span>${esc(s.note)}</span></div>` : ''}
       </div>
+      ${photoStrip(s)}
       <div class="btn-row">
         ${!s.paidDate && s.payMethod === '匯款' ? '<button class="btn" data-quick="paid">標示已收款</button>' : ''}
         ${s.shipStatus === '未寄' ? '<button class="btn" data-quick="shipped">標示已寄出</button>' : ''}
@@ -1073,7 +1460,14 @@ function settingsSheet() {
       ${simple('ship', opts('ship'), '寄送方式')}
       ${simple('expcat', opts('expcat'), '花費類別')}
 
-      <div class="card"><h3>關於</h3><p class="hint">STAR TO RECORD ${FRONT_VERSION} · 後端 ${esc(state.sync.backend || '—')}${state.sync.backend && state.sync.backend !== 'v1' ? '' : ''}</p></div>
+      <div class="card"><h3>照片與資料</h3>
+        <p class="hint" style="margin-bottom:8px">單上的照片只存在這支手機，共 ${photoStats.count} 張、約 ${fmtSize(photoStats.bytes)}。${photoStats.missing ? `<b style="color:var(--warn)">還有 ${photoStats.missing} 張在別支手機</b>，` : ''}清除瀏覽器資料或換手機，照片就會不見，所以換手機前先匯出。</p>
+        <div class="btn-row"><button class="btn" data-export>匯出照片和資料</button><button class="btn ghost" data-import>匯入</button></div>
+        <p class="hint">匯出的 zip 會放在手機的「檔案」，裡面有所有照片和全部紀錄。匯入是合併：這支手機已經有的不會被蓋掉，只補上沒有的。</p>
+        <button class="btn danger" data-clear-photos>清除這支手機上的照片</button>
+      </div>
+
+      <div class="card"><h3>關於</h3><p class="hint">STAR TO RECORD ${FRONT_VERSION} · 後端 ${esc(state.sync.backend || '—')}</p>${state.sync.backend && Number(state.sync.backend.slice(1)) < BACKEND_NEEDED ? '<p class="hint" style="color:var(--warn);margin-top:6px">後端版本太舊，請重新部署 Code.gs，才能把照片資訊同步到試算表。</p>' : ''}</div>
     </div>`;
 }
 
@@ -1121,7 +1515,7 @@ document.addEventListener('click', async (ev) => {
   /* ----- 分頁、頂部 ----- */
   if (d.tab) { state.tab = d.tab; return render(); }
   if (t.id === 'btn-eye') { state.mask = !state.mask; lsSet('sl.mask', state.mask ? '1' : ''); return render(); }
-  if (t.id === 'btn-gear' || d.act === 'settings') return openSheet('settings', settingsSheet);
+  if (t.id === 'btn-gear' || d.act === 'settings') { refreshPhotoStats(); return openSheet('settings', settingsSheet); }
   if (d.addkind) { state.addKind = d.addkind; form = null; return render(); }
   if (d.period) { state.period = d.period; return render(); }
   if (d.month) {
@@ -1148,13 +1542,30 @@ document.addEventListener('click', async (ev) => {
   if (d.act === 'edit-group') return openSheet('group-edit', () => editGroupSheet(d.id));
   if (d.act === 'edit-simple') return editSimple(d.kind, d.id);
 
+  /* ----- 照片：看大圖（任何地方的縮圖都一樣） ----- */
+  if (d.pv != null) {
+    viewer.ids = d.pv.split(','); viewer.i = Number(d.pvi) || 0;
+    return openSheet('pv', viewerHtml);
+  }
+  if (d.pvStep) {
+    viewer.i = (viewer.i + Number(d.pvStep) + viewer.ids.length) % viewer.ids.length;
+    return refreshSheets();
+  }
+  if (t.hasAttribute('data-add-photo')) return $('#photo-file').click();
+  if (d.delPhoto) return removePhoto(d.delPhoto);
+
   /* ----- 面板內 ----- */
   const sheetEl = t.closest('.sheet');
   const sheetId = sheetEl ? sheetEl.dataset.sheet : '';
-  if (t.hasAttribute('data-close')) { if (sheetId === 'form') form = null; closeSheet(sheetId); return render(); }
+  if (t.hasAttribute('data-close')) {
+    if (sheetId === 'form') { settlePhotos(false); form = null; }
+    if (sheetId === 'pv' && fullUrl) { URL.revokeObjectURL(fullUrl); fullUrl = null; }
+    closeSheet(sheetId); return render();
+  }
   if (t.hasAttribute('data-save') && sheetId === 'form') return saveForm();
   if (t.hasAttribute('data-delete') && sheetId === 'form') {
-    if (!confirm('確定刪除？')) return;
+    if (!confirm('確定刪除？（這張單的照片也會一起刪掉）')) return;
+    form.removed = []; form.added = [];
     if (form.kind === 'buy') delBuy(form.model.buy.id); else del(form.kind === 'sell' ? 'sells' : 'expenses', form.model.id);
     form = null; closeSheet('form'); closeSheet('detail'); render(); return toast('已刪除');
   }
@@ -1233,7 +1644,7 @@ function detailClick(t, d) {
     if (d.quick === 'copy') {
       closeSheet('detail');
       const { items, fees } = buyParts(id);
-      form = { kind: 'buy', editing: false, model: { buy: Object.assign({}, b, { id: '', date: todayStr(), paidDate: '', arrival: '未到', arrivedDate: '', createdAt: '' }), items: items.map((i) => Object.assign({}, i, { id: '' })), fees: fees.map((f) => Object.assign({}, f, { id: '', paid: f.kind === '後補款' ? false : f.paid, paidDate: '' })) } };
+      form = { kind: 'buy', editing: false, model: { buy: Object.assign({}, b, { id: '', date: todayStr(), paidDate: '', arrival: '未到', arrivedDate: '', createdAt: '', photoIds: '' }), items: items.map((i) => Object.assign({}, i, { id: '' })), fees: fees.map((f) => Object.assign({}, f, { id: '', paid: f.kind === '後補款' ? false : f.paid, paidDate: '' })) } };
       return openSheet('form', buyFormHtml);
     }
   } else {
@@ -1244,7 +1655,7 @@ function detailClick(t, d) {
     if (d.quick === 'edit') { closeSheet('detail'); return openForm('sell', s); }
     if (d.quick === 'copy') {
       closeSheet('detail');
-      form = { kind: 'sell', editing: false, model: Object.assign({}, s, { id: '', date: todayStr(), paidDate: '', shipStatus: '未寄', createdAt: '' }) };
+      form = { kind: 'sell', editing: false, model: Object.assign({}, s, { id: '', date: todayStr(), paidDate: '', shipStatus: '未寄', createdAt: '', photoIds: '' }) };
       return openSheet('form', sellFormHtml);
     }
   }
@@ -1253,6 +1664,12 @@ function detailClick(t, d) {
 }
 
 function settingsClick(t, d) {
+  if (t.hasAttribute('data-export')) return exportBackup();
+  if (t.hasAttribute('data-import')) return $('#import-file').click();
+  if (t.hasAttribute('data-clear-photos')) {
+    if (!confirm('刪掉這支手機上所有的照片？單上的紀錄還在，只是照片不見了。建議先匯出備份。')) return;
+    return PhotoDB.clear().then(() => { thumbUrls.forEach((u) => URL.revokeObjectURL(u)); thumbUrls.clear(); missingPhotos.clear(); render(); refreshPhotoStats(); toast('已清除照片'); });
+  }
   if (d.collapse) {
     state.collapsed[d.collapse] = !state.collapsed[d.collapse];
     lsSet('sl.collapsed', JSON.stringify(state.collapsed));
@@ -1318,6 +1735,8 @@ function onFieldChange(ev) {
     applyTheme();
     return refreshSheets();
   }
+  if (el.id === 'photo-file') { const f = el.files; if (f && f.length && form) addPhotos(f); return; }
+  if (el.id === 'import-file') { const f = el.files[0]; el.value = ''; if (f) importBackup(f); return; }
   if (el.id === 'bg-file' && el.files[0]) {
     return importBackground(el.files[0]).then(() => refreshSheets()).catch(() => toast('這張照片打不開，換一張試試'));
   }
@@ -1430,5 +1849,5 @@ async function boot() {
 boot();
 
 // 給 scripts 測試用
-window.__sl = { state, put, putBuy, render, openForm, openSheet, settingsSheet, applyTheme };
+window.__sl = { state, put, putBuy, render, openForm, openSheet, settingsSheet, applyTheme, PhotoDB, photoStats };
 })();

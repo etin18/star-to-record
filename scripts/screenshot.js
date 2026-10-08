@@ -187,6 +187,107 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   await page.click('button.btn[data-save]');
   check('花費存起來了', (await page.evaluate(() => window.__sl.state.data.expenses.length)) === 2);
 
+  /* ----- 照片：加、看大圖、刪、取消、打包、匯入 ----- */
+  const makePng = async (color) => page.evaluate(async (c) => {
+    const cv = document.createElement('canvas'); cv.width = 600; cv.height = 400;
+    const g = cv.getContext('2d'); g.fillStyle = c; g.fillRect(0, 0, 600, 400); g.fillStyle = '#fff'; g.fillRect(40, 40, 200, 120);
+    const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
+    return Array.from(new Uint8Array(await blob.arrayBuffer()));
+  }, color);
+  const p1 = path.join(OUT, '_p1.png'), p2 = path.join(OUT, '_p2.png');
+  fs.writeFileSync(p1, Buffer.from(await makePng('#c46'))); fs.writeFileSync(p2, Buffer.from(await makePng('#48c')));
+  const photoCount = () => page.evaluate(async () => (await window.__sl.PhotoDB.all()).length);
+
+  await page.click('[data-tab="add"]');
+  await page.click('[data-addkind="sell"]');
+  await page.fill('[data-path="amount"]', '321');
+  await page.setInputFiles('#photo-file', [p1, p2]);
+  await page.waitForFunction(() => document.querySelectorAll('.thumbs img[data-thumb]').length === 2 && [...document.querySelectorAll('.thumbs img[data-thumb]')].every((i) => i.naturalWidth > 0));
+  check('一次選兩張照片，縮圖都出現', (await photoCount()) === 2);
+  await shot('19-加照片');
+  await page.click('[data-del-photo]');
+  check('按 ✕ 移除新加的照片，馬上從本機刪掉', (await photoCount()) === 1);
+  await page.click('button.btn[data-save]');
+  check('存起來之後這張賣單帶著 1 張照片', await page.evaluate(() => window.__sl.state.data.sells.some((s) => s.amount === 321 && s.photoIds.split(',').length === 1)));
+
+  // 明細 → 詳細 → 大圖
+  await page.click('[data-tab="history"]');
+  await page.click('[data-filter-toggle="allTime"]');
+  check('明細那一列標出「照片 1」', (await text()).includes('照片 1'));
+  await page.locator('.item[data-act="sell"]', { hasText: '照片 1' }).first().click();
+  await page.waitForSelector('.sheet .thumb img');
+  await page.click('.sheet .thumb');
+  await page.waitForFunction(() => { const i = document.querySelector('.viewer-img img'); return i && i.naturalWidth > 0; });
+  await shot('20-看大圖');
+  check('點縮圖開大圖檢視器', true);
+  await page.click('.sheet[data-sheet="pv"] [data-close]');
+
+  // 編輯時加一張再取消，照片不能留在手機裡
+  await page.click('[data-quick="edit"]');
+  const before = await photoCount();
+  await page.setInputFiles('#photo-file', [p2]);
+  await page.waitForFunction(() => document.querySelectorAll('.sheet .thumbs img[data-thumb]').length === 2);
+  await page.click('.sheet [data-close]');
+  await page.waitForTimeout(200);
+  check('編輯到一半取消，這次新加的照片會一起清掉', (await photoCount()) === before);
+
+  // 刪掉原本的照片：要按「存起來」才真的刪
+  await page.locator('.item[data-act="sell"]', { hasText: '照片 1' }).first().click();
+  await page.click('[data-quick="edit"]');
+  await page.click('.sheet [data-del-photo]');
+  await page.click('.sheet [data-close]');
+  await page.waitForTimeout(150);
+  check('移除原本的照片後取消，照片還在', (await photoCount()) === before);
+
+  // 設定頁：統計、匯出
+  await page.click('#btn-gear');
+  await page.waitForSelector('[data-export]');
+  await page.waitForFunction(() => document.body.innerText.includes('共 1 張'));
+  await shot('21-設定-照片與資料');
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-export]')]);
+  const zipPath = path.join(OUT, '_backup.zip');
+  await dl.saveAs(zipPath);
+  const zipBytes = fs.readFileSync(zipPath);
+  const zipText = zipBytes.toString('latin1');
+  check('匯出的是 zip，裡面有照片、data.json、manifest.json', zipBytes.slice(0, 2).toString() === 'PK' && zipText.includes('data.json') && zipText.includes('manifest.json') && /photos\/[0-9a-f-]+\.jpg/.test(zipText));
+  check('檔名是 STAR-TO-RECORD_備份_日期.zip', /^STAR-TO-RECORD_備份_\d{4}-\d{2}-\d{2}\.zip$/.test(dl.suggestedFilename()));
+  const sellsBefore = await page.evaluate(() => window.__sl.state.data.sells.length);
+
+  // 全新的瀏覽器（沒有任何資料）匯入同一個 zip
+  const ctx2 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page2 = await ctx2.newPage();
+  page2.on('pageerror', (e) => errors.push('[匯入頁] ' + String(e)));
+  await page2.goto(BASE);
+  await page2.waitForSelector('#view .card');
+  await page2.click('#btn-gear');
+  await page2.setInputFiles('#import-file', zipPath);
+  await page2.waitForSelector('.toast');
+  const got = await page2.evaluate(async () => ({ sells: window.__sl.state.data.sells.length, buys: window.__sl.state.data.buys.length, photos: (await window.__sl.PhotoDB.all()).length, outbox: window.__sl.state.outbox.length }));
+  check('新手機匯入後，紀錄和照片都回來', got.sells === sellsBefore && got.buys === 5 && got.photos === 1);
+  // 再匯入一次：合併，不重複
+  await page2.setInputFiles('#import-file', zipPath);
+  await page2.waitForTimeout(600);
+  const again = await page2.evaluate(async () => ({ sells: window.__sl.state.data.sells.length, photos: (await window.__sl.PhotoDB.all()).length }));
+  check('重複匯入不會多出紀錄', again.sells === sellsBefore && again.photos === 1);
+  await page2.click('.sheet [data-close]');
+  await page2.click('[data-tab="history"]');
+  await page2.click('[data-filter-toggle="allTime"]');
+  await page2.locator('.item[data-act="sell"]', { hasText: '照片 1' }).first().click();
+  await page2.waitForFunction(() => { const i = document.querySelector('.sheet .thumb img'); return i && i.naturalWidth > 0; });
+  check('匯入後的賣單縮圖看得到', true);
+  await ctx2.close();
+
+  // 刪掉整張單，照片一起清掉
+  await page.click('.sheet [data-close]');
+  await page.click('[data-tab="history"]');
+  await page.locator('.item[data-act="sell"]', { hasText: '照片 1' }).first().click();
+  await page.click('[data-quick="edit"]');
+  page.once('dialog', (d) => d.accept());
+  await page.click('.sheet [data-delete]');
+  await page.waitForTimeout(250);
+  check('刪掉整張單，照片也一起清掉', (await photoCount()) === 0);
+  fs.rmSync(p1, { force: true }); fs.rmSync(p2, { force: true }); fs.rmSync(zipPath, { force: true });
+
   /* ----- 設定、主題 ----- */
   await page.click('#btn-gear');
   await page.waitForSelector('.sheet [data-theme-pick]');

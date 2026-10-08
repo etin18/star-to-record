@@ -39,7 +39,7 @@ const SEED = {
   parties: [{ id: 'p1', name: LONG + '賣家', platform: 'Threads' }],
   options: [{ id: 'c1', kind: 'channel', name: LONG + '通路' }, { id: 's0', kind: 'ship', name: '賣貨便' }, { id: 'x0', kind: 'expcat', name: '演唱會' }],
   buys: [
-    { id: 'b1', date: iso(-3), partyId: 'p1', partyName: LONG + '賣家', payMethod: '匯款', accountId: 'a1', paidDate: iso(-2), currency: 'TWD', arrival: '未到', note: LONG.repeat(3) },
+    { id: 'b1', date: iso(-3), partyId: 'p1', partyName: LONG + '賣家', payMethod: '匯款', accountId: 'a1', paidDate: iso(-2), currency: 'TWD', arrival: '未到', note: LONG.repeat(3), photoIds: 'ph1,ph2,ph3,ph4,ph5,ph6,ph7' },
     { id: 'b2', date: iso(-8), partyId: 'p1', partyName: LONG + '賣家', payMethod: '刷卡', accountId: 'a1', paidDate: iso(-8), currency: 'KRW', paidTwd: 0, pending: true, arrival: '未到' }
   ],
   buyItems: [
@@ -96,6 +96,15 @@ function scan() {
       }, [SEED, theme]);
       await page.goto(BASE);
       await page.waitForSelector('#view .card');
+      // 照片：前 5 張在這支手機，後 2 張「在別支手機」
+      await page.evaluate(async () => {
+        for (const id of ['ph1', 'ph2', 'ph3', 'ph4', 'ph5']) {
+          const cv = document.createElement('canvas'); cv.width = 300; cv.height = 200; cv.getContext('2d').fillRect(0, 0, 300, 200);
+          const blob = await new Promise((r) => cv.toBlob(r, 'image/jpeg'));
+          await window.__sl.PhotoDB.put(id, { full: blob, thumb: blob });
+        }
+        window.__sl.render();
+      });
 
       const pages = [
         ['首頁', async () => page.click('[data-tab="home"]')],
@@ -108,9 +117,11 @@ function scan() {
         ['明細', async () => { await page.click('[data-tab="history"]'); await page.click('[data-filter-toggle="allTime"]').catch(() => {}); }],
         ['明細-選了團', async () => { await page.selectOption('[data-filter="groupId"]', 'gA'); }],
         ['設定', async () => { await page.click('#btn-gear'); }],
+        ['設定-照片與資料', async () => { await page.waitForTimeout(150); }],
         ['設定-對象展開', async () => { await page.click('[data-collapse="parties"]'); }],
         ['買單詳細', async () => { await page.click('.sheet [data-close]'); await page.click('[data-tab="home"]'); await page.click('[data-act="buy"][data-id="b1"]'); }],
-        ['買單編輯（長資料）', async () => { await page.click('[data-quick="edit"]'); }],
+        ['買單大圖', async () => { await page.click('.sheet .thumb'); await page.waitForTimeout(120); }],
+        ['買單編輯（長資料、七張照片）', async () => { await page.click('.sheet[data-sheet="pv"] [data-close]'); await page.click('[data-quick="edit"]'); }],
         ['賣單詳細', async () => { await page.click('.sheet [data-close]'); await page.click('[data-tab="home"]'); await page.click('[data-act="sell"][data-id="s1"]'); }],
         ['團明細', async () => { await page.click('.sheet [data-close]'); await page.click('[data-tab="report"]'); await page.click('[data-act="group"][data-id="gA"]'); }],
         ['收集表', async () => { await page.click('[data-act="collection"][data-id="r1"]'); }]
