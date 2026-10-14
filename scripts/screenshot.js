@@ -165,10 +165,16 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   /* ----- 明細 ----- */
   await page.click('[data-tab="history"]');
   await shot('09-明細');
-  await page.click('[data-filter-toggle="allTime"]');
   await page.selectOption('[data-filter="flag"]', '多帶');
   check('篩「多帶」只剩買單', (await page.locator('.kk.buy').count()) > 0 && (await page.locator('.kk.sell').count()) === 0);
   await page.selectOption('[data-filter="flag"]', '');
+  // 搜尋：一個字一個字打，輸入框要一直在、一直有焦點
+  await page.click('[data-filter="q"]');
+  await page.keyboard.type('簽售');
+  check('搜尋可以連續打字，焦點沒有掉', await page.evaluate(() => document.activeElement && document.activeElement.dataset.filter === 'q' && document.activeElement.value === '簽售'));
+  check('搜尋「簽售」只剩有簽售的列', (await page.locator('#hist-results .item').count()) > 0 && (await page.locator('#hist-results .item', { hasText: '空專' }).count()) === 0);
+  await page.fill('[data-filter="q"]', '');
+  check('清空搜尋後列表回來', (await page.locator('#hist-results .item').count()) > 2);
   check('明細每一列都有種類圖示與小字', (await page.locator('.item .av').count()) === (await page.locator('.item .kk').count()));
 
   /* ----- 賣單、花費 ----- */
@@ -212,7 +218,6 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
 
   // 明細 → 詳細 → 大圖
   await page.click('[data-tab="history"]');
-  await page.click('[data-filter-toggle="allTime"]');
   check('明細那一列標出「照片 1」', (await text()).includes('照片 1'));
   await page.locator('.item[data-act="sell"]', { hasText: '照片 1' }).first().click();
   await page.waitForSelector('.sheet .thumb img');
@@ -271,7 +276,6 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   check('重複匯入不會多出紀錄', again.sells === sellsBefore && again.photos === 1);
   await page2.click('.sheet [data-close]');
   await page2.click('[data-tab="history"]');
-  await page2.click('[data-filter-toggle="allTime"]');
   await page2.locator('.item[data-act="sell"]', { hasText: '照片 1' }).first().click();
   await page2.waitForFunction(() => { const i = document.querySelector('.sheet .thumb img'); return i && i.naturalWidth > 0; });
   check('匯入後的賣單縮圖看得到', true);

@@ -11,6 +11,8 @@
 (function (root) {
   'use strict';
 
+  /** 付了錢但不知道哪天：App 會把它算進「全部」，但不屬於任何一個月 */
+  const UNKNOWN_DATE = '日期不詳';
   const CURRENCIES = { TWD: '台幣', KRW: '韓元', JPY: '日圓', USD: '美元' };
   const SYMBOLS = { TWD: '$', KRW: '₩', JPY: '¥', USD: 'US$' };
   const isTwd = (c) => !c || c === 'TWD';
@@ -257,7 +259,7 @@
     const by = index(data);
     const thisMonth = monthOf(today);
     const t = { unpaid: [], preorder: [], notArrived: [], feesUnpaid: [], sellUnpaid: [], notShipped: [], pending: [] };
-    const daysSince = (d) => (d ? Math.max(0, Math.round((new Date(today) - new Date(d)) / 86400000)) : 0);
+    const daysSince = (d) => { const t = new Date(d); return d && !isNaN(t) ? Math.max(0, Math.round((new Date(today) - t) / 86400000)) : null; };   // 日期不詳就沒有「等了幾天」
 
     (data.buys || []).forEach((buy) => {
       if (isCancelled(buy)) return;
@@ -292,7 +294,7 @@
   }
 
   const api = {
-    CURRENCIES, SYMBOLS, isTwd, list, num, ym, index,
+    UNKNOWN_DATE, CURRENCIES, SYMBOLS, isTwd, list, num, ym, index,
     itemTotal, itemsSum, buyGoods, feesSum, isCancelled,
     events, summary, monthly, accountFlows, allocations,
     byGroup, groupDetail, multiSpend, spareCounts, collection, todos

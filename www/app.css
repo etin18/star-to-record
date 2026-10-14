@@ -11,12 +11,12 @@ html { -webkit-text-size-adjust: 100%; }
   --page: #faf7f5; --card: #fff; --line: #eee6e1; --text: #2a2430; --muted: #7d7485;
   --accent: #ac76bd; --accent-ink: #fff; --warn: #c9651e; --good: #2f8758; --bad: #c8434a;
   --chip: #f2ebf8; --bar: #fff; --shadow: 0 1px 2px rgba(40, 20, 60, .06);
-  --bar-out: #d4545a; --bar-in: #3f9d6b; --pop: #fff;
+  --bar-out: #d4545a; --bar-in: #3f9d6b; --pop: #fff; --sub: #9d94a3;
 }
 :root[data-theme="dark"] {
   --page: #16141b; --card: #201d28; --line: #2e2a38; --text: #f0ecf5; --muted: #a39cae;
   --accent: #b58be6; --accent-ink: #1a1422; --warn: #f0a063; --good: #6fcf9b; --bad: #f0777c;
-  --chip: #2c2536; --pop: #2a2536; --bar: #1c1a23; --shadow: none; --bar-out: #f0777c; --bar-in: #6fcf9b;
+  --chip: #2c2536; --pop: #2a2536; --sub: #857e92; --bar: #1c1a23; --shadow: none; --bar-out: #f0777c; --bar-in: #6fcf9b;
 }
 :root[data-theme="photo"] { --shadow: none; --bar-out: var(--bad); --bar-in: var(--good); }
 /* 白字、白色半透明玻璃（粉紫主題） */
@@ -247,7 +247,8 @@ table.matrix small { display: block; font-size: 10px; font-weight: 400; color: v
 .av.buy { background: color-mix(in srgb, var(--bad) 14%, transparent); }
 .av.sell { background: color-mix(in srgb, var(--good) 14%, transparent); }
 .av.expense { background: color-mix(in srgb, var(--warn) 16%, transparent); }
-.kk { font-size: 11px; font-weight: 700; letter-spacing: .04em; line-height: 1.3; }
+.kk { font-size: 11px; font-weight: 700; letter-spacing: .04em; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kk-x { font-weight: 400; color: var(--muted); letter-spacing: 0; }
 
 /* 照片主題的面板頂欄：不要自己一塊深色底，讓照片直接透出來，跟下面的玻璃卡片連成一氣 */
 [data-theme="photo"] .sheet-top { background: transparent; border-bottom-color: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; }
@@ -304,3 +305,10 @@ table.matrix small { display: block; font-size: 10px; font-weight: 400; color: v
 .viewer-img img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .viewer-nav { display: flex; gap: 8px; padding: 10px 14px calc(env(safe-area-inset-bottom) + 14px); }
 .viewer-nav .btn { flex: 1; }
+
+/* 列表標題是品項，可以長，最多顯示兩行 */
+.item .t.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+
+/* 列表第二行（賣家、回歸、日期、狀態）：比標題淡一點、小一點，讓品項名稱最醒目 */
+:root[data-theme="photo"] { --sub: rgba(255, 255, 255, .56); }
+.item .s { color: var(--sub, var(--muted)); font-size: 11.5px; }

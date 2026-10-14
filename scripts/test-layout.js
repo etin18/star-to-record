@@ -65,6 +65,12 @@ function scan() {
   }
   for (const el of document.querySelectorAll('#view *, .sheet *')) {
     if (el.closest('.matrix-wrap') || el.closest('.toast')) continue;
+    // 外層是「超出就變成 …」的一行文字（text-overflow: ellipsis）：裡面的字長到被截掉是設計好的，不算跑出去
+    let ellipsed = false;
+    for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+      if (getComputedStyle(p).textOverflow === 'ellipsis') { ellipsed = true; break; }
+    }
+    if (ellipsed && el.tagName === 'SPAN' && el.classList.contains('kk-x')) continue;
     const r = el.getBoundingClientRect();
     if (r.width && r.right > vw + 1) problems.push(`超出右緣：${label(el)}（right ${Math.round(r.right)} > ${vw}）`);
   }
@@ -114,7 +120,7 @@ function scan() {
         ['記一筆-花費', async () => { await page.click('[data-addkind="expense"]'); }],
         ['報表-單月', async () => { await page.click('[data-tab="report"]'); await page.click('[data-period="month"]'); }],
         ['報表-全部', async () => { await page.click('[data-tab="report"]'); await page.click('[data-period="all"]'); }],
-        ['明細', async () => { await page.click('[data-tab="history"]'); await page.click('[data-filter-toggle="allTime"]').catch(() => {}); }],
+        ['明細', async () => { await page.click('[data-tab="history"]'); }],
         ['明細-選了團', async () => { await page.selectOption('[data-filter="groupId"]', 'gA'); }],
         ['設定', async () => { await page.click('#btn-gear'); }],
         ['設定-照片與資料', async () => { await page.waitForTimeout(150); }],

@@ -8,7 +8,7 @@
 'use strict';
 
 const C = window.Calc;
-const FRONT_VERSION = 'v2';
+const FRONT_VERSION = 'v3';
 const BACKEND_NEEDED = 2;   // 前端需要的最低後端版本（v2 起試算表多一欄「照片」）
 const ENTITIES = ['groups', 'members', 'releases', 'accounts', 'parties', 'options', 'buys', 'buyItems', 'buyFees', 'sells', 'expenses'];
 const FLAGS = ['多帶', '重複', '自留'];
@@ -64,7 +64,7 @@ const state = {
   collapsed: Object.assign({ parties: true }, jsonGet('sl.collapsed', {})),   // 設定頁哪些清單收起來；對象會越來越多，預設收合
   period: 'month',          // 報表：month／all
   month: todayStr().slice(0, 7),
-  filter: { kinds: ['buy', 'sell', 'expense'], groupId: '', memberId: '', accountId: '', partyId: '', flag: '', q: '', month: todayStr().slice(0, 7), allTime: false },
+  filter: { kinds: ['buy', 'sell', 'expense'], groupId: '', memberId: '', accountId: '', partyId: '', flag: '', q: '', month: todayStr().slice(0, 7), allTime: true },
   sync: { status: jsonGet('sl.data', null) ? 'idle' : 'idle', backend: '', error: '' }
 };
 ENTITIES.forEach((e) => { state.data[e] = []; });
@@ -217,7 +217,8 @@ function ensureDefaults() {
   Object.keys(DEFAULT_OPTIONS).forEach((kind) => {
     if (state.data.options.some((o) => o.kind === kind)) return;
     DEFAULT_OPTIONS[kind].forEach((name) => {
-      state.data.options.push({ id: uid(), kind, name, createdAt: new Date().toISOString() });
+      // 編號固定：就算兩支手機同時第一次打開，存到試算表也是同一列，不會變成兩份
+      state.data.options.push({ id: `default-${kind}-${name}`, kind, name, createdAt: new Date().toISOString() });
       state.outbox.push({ action: 'save', entity: 'options', record: state.data.options[state.data.options.length - 1] });
     });
     changed = true;
@@ -234,7 +235,8 @@ const money = (n, sign) => {
   return (sign && v > 0 ? '+' : v < 0 ? '−' : '') + '$' + Math.abs(v).toLocaleString('en-US');
 };
 const foreign = (n, cur) => (state.mask ? '•••' : (C.SYMBOLS[cur] || '$') + (Number(n) || 0).toLocaleString('en-US'));
-const mmdd = (d) => (d ? d.slice(5).replace('-', '/') : '');
+const mmdd = (d) => (!d ? '' : /^\d{4}-\d{2}-\d{2}/.test(d) ? d.slice(5).replace('-', '/') : d);   // 日期不詳就原樣顯示
+const joinDot = (...parts) => parts.filter(Boolean).join(' · ');
 const opts = (kind) => state.data.options.filter((o) => o.kind === kind);
 const nameOf = (entity, id, fallback) => (idx()[entity] && idx()[entity][id] ? idx()[entity][id].name : fallback || '');
 const membersOf = (groupId) => state.data.members.filter((m) => m.groupId === groupId);
@@ -249,12 +251,20 @@ const buyTotal = (buy) => {
   const { items, fees } = buyParts(buy.id);
   return C.buyGoods(buy, items) + C.feesSum(fees.filter((f) => f.paid));
 };
+/** 列表上的標題：這張單買了什麼（品項最重要）。最多列兩個，其餘用「等 N 項」 */
 const buyLabel = (buy) => {
+  const names = buyParts(buy.id).items.filter((i) => !i.cancelled).map((i) => i.name || '（未命名）');
+  if (!names.length) return '（沒有品項）';
+  return names.length > 2 ? `${names[0]}、${names[1]} 等 ${names.length} 項` : names.join('、');
+};
+/** 面板標題與其他需要「跟誰買、哪個回歸」的地方 */
+const buyHeading = (buy) => {
   const items = buyParts(buy.id).items;
   const first = items[0];
   const rel = first && first.releaseId ? nameOf('releases', first.releaseId) : first ? nameOf('groups', first.groupId) : '';
   return [buy.partyName || '（未填賣家）', rel].filter(Boolean).join(' · ');
 };
+const buyReleases = (buy) => [...new Set(buyParts(buy.id).items.map((i) => (i.releaseId ? nameOf('releases', i.releaseId) : '')).filter(Boolean))].join('、');
 
 function toast(msg) {
   const el = document.createElement('div');
@@ -756,7 +766,8 @@ function render() {
    首頁：待處理
    ========================================================================== */
 function todoRow(act, id, title, sub, amount, cls) {
-  return `<div class="item" data-act="${act}" data-id="${id}"><div class="main"><div class="t">${esc(title)}</div><div class="s">${esc(sub)}</div></div><div class="amt ${cls || ''}">${amount}</div></div>`;
+  if (act === 'buy') { const b = idx().buys[id]; if (b) sub = joinDot(b.partyName || '（未填賣家）', sub); }
+  return `<div class="item" data-act="${act}" data-id="${id}"><div class="main"><div class="t wrap">${esc(title)}</div><div class="s">${esc(sub)}</div></div><div class="amt ${cls || ''}">${amount}</div></div>`;
 }
 function todoCard(title, rows) {
   return rows.length ? `<div class="card"><h3>${title} <span class="badge">${rows.length}</span></h3>${rows.join('')}</div>` : '';
@@ -765,8 +776,8 @@ function todoCard(title, rows) {
 function viewHome() {
   const t = C.todos(state.data, todayStr());
   const cards = [
-    todoCard('還沒付', t.unpaid.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), `${mmdd(x.buy.date)} 下單 · ${x.buy.payMethod} · 已 ${x.days} 天`, money(x.total)))),
-    todoCard('還沒到貨', t.notArrived.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), `${x.buy.paidDate ? '已付款 ' + mmdd(x.buy.paidDate) : x.buy.payMethod} · 等了 ${x.days} 天`, money(x.total)))),
+    todoCard('還沒付', t.unpaid.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(x.buy.date && mmdd(x.buy.date) + ' 下單', x.buy.payMethod, x.days != null && `已 ${x.days} 天`), money(x.total)))),
+    todoCard('還沒到貨', t.notArrived.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(x.buy.paidDate ? '已付款 ' + mmdd(x.buy.paidDate) : x.buy.payMethod, x.days != null && `等了 ${x.days} 天`), money(x.total)))),
     todoCard('後補款還沒付', t.feesUnpaid.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), x.fee.kind + (x.fee.note ? ' · ' + x.fee.note : ''), x.fee.amount ? money(x.fee.amount) : '？'))),
     todoCard('買家還沒匯款', t.sellUnpaid.map((x) => todoRow('sell', x.sell.id, `${x.sell.partyName || '（未填買家）'} · ${x.sell.content || ''}`, [mmdd(x.sell.date), x.sell.shipMethod].filter(Boolean).join(' · '), money(x.sell.amount), 'in'))),
     todoCard('還沒寄', t.notShipped.map((x) => todoRow('sell', x.sell.id, `${x.sell.partyName || '（未填買家）'} · ${x.sell.content || ''}`, [mmdd(x.sell.date), x.sell.shipMethod || '未選寄送方式'].join(' · '), money(x.sell.amount), 'in'))),
@@ -791,20 +802,22 @@ function viewHome() {
    ========================================================================== */
 function histRow(kind, r) {
   const head = `<span class="av ${kind}">${KIND_ICONS[kind]}</span>`;
-  const label = `<div class="kk ${kind}">${KIND_LABEL[kind]}</div>`;
+  // 種類小字後面接「哪一次回歸」。賣單、花費沒有記回歸，改接團名
+  const where = kind === 'buy' ? buyReleases(r) : (r.groupId ? nameOf('groups', r.groupId) : '');
+  const label = `<div class="kk ${kind}">${KIND_LABEL[kind]}${where ? ` <span class="kk-x">· ${esc(where)}</span>` : ''}</div>`;
   if (kind === 'buy') {
     const { items } = buyParts(r.id);
     const flagged = items.some((i) => C.list(i.flags).includes('多帶'));
     const dim = C.isCancelled(r);
-    const sub = `${mmdd(r.date)} · ${items.length} 項${r.arrival === '已到' ? ' · 已到貨' : r.arrival === '已取消' ? ' · 已取消' : ''}${r.paidDate ? '' : ' · 未付'}`;
-    return `<div class="item" data-act="buy" data-id="${r.id}" style="${dim ? 'opacity:.5' : ''}">${head}<div class="main">${label}<div class="t">${esc(buyLabel(r))}</div><div class="s">${esc(sub)} ${flagged ? '<span class="tag warn">多帶</span>' : ''}${photoTag(r)}</div></div><div class="amt out">${money(-buyTotal(r))}</div></div>`;
+    const sub = joinDot(r.partyName || '（未填賣家）', mmdd(r.date), r.arrival === '已到' ? '已到貨' : r.arrival === '已取消' ? '已取消' : '', r.paidDate ? '' : '未付');
+    return `<div class="item" data-act="buy" data-id="${r.id}" style="${dim ? 'opacity:.5' : ''}">${head}<div class="main">${label}<div class="t wrap">${esc(buyLabel(r))}</div><div class="s">${flagged ? '<span class="tag warn">多帶</span>' : ''}${photoTag(r)}${esc(sub)}</div></div><div class="amt out">${money(-buyTotal(r))}</div></div>`;
   }
   if (kind === 'sell') {
-    return `<div class="item" data-act="sell" data-id="${r.id}">${head}<div class="main">${label}<div class="t">${esc(r.partyName || '（未填買家）')}${r.content ? ' · ' + esc(r.content) : ''}</div><div class="s">${mmdd(r.date)} · ${r.paidDate ? '已收款' : '未收款'} · ${esc(r.shipStatus || '')}${photoTag(r)}</div></div><div class="amt in">${money(r.amount, true)}</div></div>`;
+    return `<div class="item" data-act="sell" data-id="${r.id}">${head}<div class="main">${label}<div class="t wrap">${esc(r.content || r.partyName || '（未填內容）')}</div><div class="s">${photoTag(r)}${esc(joinDot(r.content && (r.partyName || '（未填買家）'), mmdd(r.date), r.paidDate ? '已收款' : '未收款', r.shipStatus))}</div></div><div class="amt in">${money(r.amount, true)}</div></div>`;
   }
-  return `<div class="item" data-act="expense" data-id="${r.id}">${head}<div class="main">${label}<div class="t">${esc(r.category || '')}${r.content ? ' · ' + esc(r.content) : ''}</div><div class="s">${mmdd(r.date)}${r.groupId ? ' · ' + esc(nameOf('groups', r.groupId)) : ''}${photoTag(r)}</div></div><div class="amt out">${money(-r.amount)}</div></div>`;
+  return `<div class="item" data-act="expense" data-id="${r.id}">${head}<div class="main">${label}<div class="t wrap">${esc(r.content || r.category || '')}</div><div class="s">${photoTag(r)}${esc(joinDot(r.content && r.category, mmdd(r.date)))}</div></div><div class="amt out">${money(-r.amount)}</div></div>`;
 }
-const photoTag = (r) => (C.list(r.photoIds).length ? ` <span class="tag">照片 ${C.list(r.photoIds).length}</span>` : '');
+const photoTag = (r) => (C.list(r.photoIds).length ? `<span class="tag">照片 ${C.list(r.photoIds).length}</span>` : '');   // 標籤放在文字前面：後面的文字太長被截掉時，標籤才不會跟著不見
 
 /* ==========================================================================
    記一筆
@@ -919,11 +932,21 @@ function applyFilter() {
 
 const sel = (name, cur, options, blank) => `<select data-filter="${name}">${blank ? `<option value="">${blank}</option>` : ''}${options.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
 
-function viewHistory() {
-  const f = state.filter;
+/** 明細下半部：列表與小計。搜尋時只重畫這一塊，輸入框不動，才不會一打字就失焦（中文輸入法也不會被打斷） */
+function historyResultsHtml() {
   const rows = applyFilter();
   let buy = 0, sell = 0, exp = 0;
   rows.forEach((x) => { if (x.kind === 'buy') buy += x.amount; else if (x.kind === 'sell') sell += x.amount; else exp += x.amount; });
+  return `
+    <div class="card">${rows.length ? rows.map((x) => histRow(x.kind, x.r)).join('') : '<p class="hint">這段期間沒有符合的紀錄</p>'}</div>
+    <div class="card"><h3>本期小計</h3>
+      <div class="field"><span>買單</span><span class="amt">${money(buy)}</span></div>
+      <div class="field"><span>賣單</span><span class="amt in">${money(sell, true)}</span></div>
+      <div class="field"><span>花費</span><span class="amt">${money(exp)}</span></div></div>`;
+}
+
+function viewHistory() {
+  const f = state.filter;
   const kinds = [['buy', '買單'], ['sell', '賣單'], ['expense', '花費']];
 
   return `
@@ -939,11 +962,7 @@ function viewHistory() {
       <div class="field"><span>對象</span>${sel('partyId', f.partyId, state.data.parties.map((p) => [p.id, p.name]), '全部')}</div>
       <div class="field"><span>帳戶</span>${sel('accountId', f.accountId, state.data.accounts.map((a) => [a.id, a.name]), '全部')}</div>
       <div class="field"><span>標記</span>${sel('flag', f.flag, FLAGS.map((x) => [x, x]), '全部')}</div></div>
-    <div class="card">${rows.length ? rows.map((x) => histRow(x.kind, x.r)).join('') : '<p class="hint">這段期間沒有符合的紀錄</p>'}</div>
-    <div class="card"><h3>本期小計</h3>
-      <div class="field"><span>買單</span><span class="amt">${money(buy)}</span></div>
-      <div class="field"><span>賣單</span><span class="amt in">${money(sell, true)}</span></div>
-      <div class="field"><span>花費</span><span class="amt">${money(exp)}</span></div></div>`;
+    <div id="hist-results">${historyResultsHtml()}</div>`;
 }
 
 /* ==========================================================================
@@ -1149,7 +1168,7 @@ function buyFormHtml() {
         ${C.isTwd(m.buy.currency) ? '' : fCheck('待確認', 'buy.pending')}
         ${form.editing ? '' : `<div class="field"><button class="chip" data-more>${state.addMore ? '收起 ▴' : '到貨與付款日 ▾'}</button></div>`}
         ${state.addMore || form.editing ? `
-          ${m.buy.payMethod !== '貨付' ? fInput('付款日', 'buy.paidDate', 'date', '空白＝還沒付') : ''}
+          ${m.buy.payMethod !== '貨付' ? `<div class="field"><label>付款日</label><span class="pq"><input type="date" data-path="buy.paidDate" value="${esc(/^\d{4}-/.test(m.buy.paidDate) ? m.buy.paidDate : '')}" style="width:auto;flex:1;text-align:right"><button class="chip ${m.buy.paidDate === C.UNKNOWN_DATE ? 'on' : ''}" data-unknown-paid>日期不詳</button></span></div>` : ''}
           ${fSelect('到貨狀態', 'buy.arrival', ARRIVAL.map((x) => [x, x]))}
           ${m.buy.arrival === '已到' ? fInput('到貨日', 'buy.arrivedDate', 'date') : fInput('預計到貨', 'buy.expectedMonth', 'month', '預購才填')}` : ''}
       </div>
@@ -1329,7 +1348,7 @@ function detailBuy(id) {
   const { items, fees } = buyParts(id);
   const cur = b.currency;
   return `
-    ${sheetTop(buyLabel(b), '關閉')}
+    ${sheetTop(buyHeading(b), '關閉')}
     <div class="sheet-body">
       <div class="card">
         <div class="field"><span>下單日</span><span>${esc(b.date)}</span></div>
@@ -1583,6 +1602,7 @@ let detailId = null;
 
 function formClick(t, d) {
   const m = form.model;
+  if (t.hasAttribute('data-unknown-paid')) { const b = form.model.buy; b.paidDate = b.paidDate === C.UNKNOWN_DATE ? '' : C.UNKNOWN_DATE; return refreshForm(); }
   if (t.hasAttribute('data-more')) { state.addMore = !state.addMore; return refreshForm(); }
   if (t.hasAttribute('data-add-item')) { m.items.push(emptyItem(m.items[m.items.length - 1])); return refreshForm(); }
   if (d.delItem != null) { m.items.splice(Number(d.delItem), 1); if (!m.items.length) m.items.push(emptyItem(null)); return refreshForm(); }
@@ -1806,7 +1826,12 @@ document.addEventListener('change', onFieldChange);
 document.addEventListener('input', (ev) => {
   const el = ev.target;
   if (el.dataset && el.dataset.pcombo) return comboFill(el, el.value);
-  if (el.dataset && el.dataset.filter === 'q') { state.filter.q = el.value; return render(); }
+  if (el.dataset && el.dataset.filter === 'q') {
+    state.filter.q = el.value;
+    const box = $('#hist-results');
+    if (box) box.innerHTML = historyResultsHtml();   // 只換結果，輸入框原封不動
+    return;
+  }
   if (el.dataset && el.dataset.slider) return onFieldChange(ev);
   if (form && el.dataset && el.dataset.path && el.tagName !== 'SELECT' && el.type !== 'checkbox' && !/date|month/.test(el.type)) {
     setPath(form.model, el.dataset.path, el.value);
@@ -1841,7 +1866,8 @@ async function boot() {
   if (saved) bgData = saved;
   if (state.theme === 'custom' && !bgData) state.theme = 'glow';
   applyTheme();
-  ensureDefaults();
+  // 有連試算表時要等第一次讀回來再補預設選項，不然新手機會在讀到之前先自己建一份
+  if (!state.apiUrl) ensureDefaults();
   render();
   if (state.apiUrl) pull();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

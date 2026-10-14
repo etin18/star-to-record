@@ -135,4 +135,16 @@ ok('預計到貨的月份到了，就從預購中移到還沒到貨', () => {
   assert.deepEqual(t.notArrived.map((x) => x.buy.id), ['b2']);
 });
 
+ok('付款日不詳：算進「全部」，不算進任何一個月，也不會出現 NaN 天', () => {
+  const d = { buys: [{ id: 'u1', payMethod: '匯款', paidDate: C.UNKNOWN_DATE, currency: 'TWD', arrival: '未到' },
+                     { id: 'u2', payMethod: '匯款', paidDate: '', currency: 'TWD', arrival: '未到', date: '' }],
+              buyItems: [{ id: 'x', buyId: 'u1', groupId: 'g', price: 500, qty: 1 }, { id: 'y', buyId: 'u2', groupId: 'g', price: 70, qty: 1 }] };
+  assert.equal(C.summary(d, null).spend, 500);
+  assert.equal(C.summary(d, '2026-10').spend, 0);
+  const t = C.todos(d, '2026-10-10');
+  assert.deepEqual(t.notArrived.map((x) => x.buy.id), ['u1']);
+  assert.equal(t.notArrived[0].days, null);
+  assert.equal(t.unpaid[0].days, null);          // 沒有下單日
+});
+
 console.log(`\n${n} 組全過`);
