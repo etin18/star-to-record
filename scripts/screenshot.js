@@ -66,6 +66,10 @@ const SEED = {
   expenses: [{ id: 'e1', date: iso(-2), category: '演唱會', content: '門票', amount: 3800, accountId: 'a1', groupId: 'gB' }]
 };
 
+// 匯率不連真的網路：固定 1 台幣＝40 韓元，結果才穩定
+const RATE_JSON = JSON.stringify({ date: '2026-11-01', twd: { krw: 40, jpy: 5, usd: 0.03 } });
+const stubRates = (c) => c.route(/currency-api/, (r) => r.fulfill({ status: 200, contentType: 'application/json', body: RATE_JSON }));
+
 const errors = [];
 const checks = [];
 const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' : '  ✗', name); };
@@ -73,6 +77,7 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
 (async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
+  await stubRates(ctx);
   const page = await ctx.newPage();
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', (e) => errors.push(String(e)));
@@ -86,13 +91,18 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   const text = () => page.evaluate(() => document.body.innerText);
 
   /* ----- 首頁 ----- */
+  await page.waitForFunction(() => document.body.innerText.includes('約 $1,550'));   // 匯率抓到後重畫
   await shot('01-首頁');
   let t = await text();
+  const dueText = () => page.evaluate(() => (document.querySelector('#view .card.due') || {}).innerText || '');
+  check('首頁最上面只有兩個數字：待付 $368（還沒付 288 含運費＋整單二補 80）、待收 $120', await page.evaluate(() => document.querySelector('#view .card').classList.contains('due')) && (await dueText()).replace(/\s+/g, ' ').trim() === '待付 $368 待收 $120');
   check('首頁有「還沒付」', t.includes('還沒付'));
   check('首頁有「預購中」（預計下下個月到貨的那張）', /^預購中\s/m.test(t) && t.includes('預計 ' + nextMonth + ' 到貨'));
-  check('首頁有後補款提醒', t.includes('後補款還沒付'));
+  check('首頁有整單二補提醒（試算表裡的舊名稱「後補款」自動換成新名字）', t.includes('整單二補還沒付') && !t.includes('後補款'));
   check('首頁有買家還沒匯款、還沒寄', t.includes('買家還沒匯款') && t.includes('還沒寄'));
   check('首頁有待確認（外幣實付台幣沒填）', t.includes('待確認'));
+  check('首頁「還沒付」那一列含一起付的運費（250＋38），跟待付對得起來', /簽售卡 1\.0[\s\S]{0,60}\$288/.test(t));
+  check('首頁的韓元單沒填實付台幣：用匯率估成「約 $1,550」，不會把 ₩62,000 當台幣', t.includes('約 $1,550') && !t.includes('$62,000'));
 
   /* ----- 點進買單詳細，標示已付款 ----- */
   await page.click('[data-act="buy"][data-id="b1"]');
@@ -102,6 +112,7 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   await page.click('.sheet [data-close]');
   t = await text();
   check('標示已付款後「還沒付」那組消失', !/^還沒付\s/m.test(t));
+  check('付款後待付只剩整單二補 $80', (await dueText()).includes('待付 $80') || (await dueText()).replace(/\s+/g, ' ').includes('待付 $80'));
 
   /* ----- 記買單：從頭填一張 ----- */
   await page.click('[data-tab="add"]');
@@ -140,28 +151,81 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   await page.click('[data-no-order]');
   check('按「還沒下單」，下單日清空', (await page.inputValue('[data-path="buy.date"]')) === '');
   await page.fill('[data-path="buy.callDate"]', '2026-10-01');
-  // 貨付＋：這個品項 300 元裡，30 取貨時才付
-  await page.fill('[data-path="items.0.cod"]', '30');
-  check('小計註明取貨付 30', (await page.textContent('[data-sub="0"]')).includes('取貨付') && (await page.textContent('[data-sub="0"]')).includes('30'));
+  // 多付、二補：每一張多 30 和 70 → (150+30+70)×2 ＝ 500
+  await page.fill('[data-path="items.0.extra"]', '30');
+  await page.fill('[data-path="items.0.second"]', '70');
+  const sub = await page.textContent('[data-sub="0"]');
+  check('小計列出算式 (150＋30＋70)×2 ＝ $500', sub.includes('(150＋30＋70)×2') && sub.includes('$500'));
   await page.click('[data-add-fee]');
+  check('費用類別裡有「整單二補」、沒有「後補款」', await page.evaluate(() => { const o = [...document.querySelectorAll('[data-path="fees.0.kind"] option')].map((x) => x.value); return o.includes('整單二補') && !o.includes('後補款'); }));
   await page.fill('[data-path="fees.0.amount"]', '38');
+  check('合計含多付、二補和運費（500＋38）', (await page.textContent('button.btn[data-save]')).includes('538'));
   await shot('04-買單填好');
   await page.click('button.btn[data-save]');
   await page.waitForSelector('.toast');
   const saved = await page.evaluate(() => window.__sl.state.data.buys.length);
   check('買單存起來了', saved === 5);
   check('這張單有喊單日、沒有下單日', await page.evaluate(() => window.__sl.state.data.buys.some((b) => b.callDate === '2026-10-01' && b.date === '')));
-  check('品項存了貨付＋ 30', await page.evaluate(() => window.__sl.state.data.buyItems.some((i) => i.cod === 30)));
+  check('品項存了多付 30、二補 70', await page.evaluate(() => window.__sl.state.data.buyItems.some((i) => i.extra === 30 && i.second === 70)));
 
   // 首頁「還沒下單」
   await page.click('[data-tab="home"]');
   check('首頁有「還沒下單」，而且在最近的上面', await page.evaluate(() => { const t = document.body.innerText; return /^還沒下單\s/m.test(t) && t.indexOf('還沒下單') < t.indexOf('最近'); }));
   await page.locator('.item[data-act="buy"]', { hasText: '簽售卡 2.0' }).first().click();
   await page.waitForSelector('[data-quick="ordered"]');
-  check('詳細頁顯示貨付＋ 與「標示已下單」', (await text()).includes('貨付＋') && (await text()).includes('標示已下單'));
+  check('詳細頁的品項列出多付、二補，還有「標示已下單」', (await text()).includes('單價 $150 ＋ 多付 $30 ＋ 二補 $70，× 2') && (await text()).includes('標示已下單'));
   await page.click('[data-quick="ordered"]');
   await page.click('.sheet [data-close]');
   check('標示已下單後，離開「還沒下單」', !/^還沒下單\s/m.test(await text()));
+
+  /* ----- 一起到貨：兩張單一起寄到超商，運費 38 平分 ----- */
+  check('首頁「還沒到貨」旁邊有「一起到貨」', await page.locator('[data-ship-open]').count() === 1);
+  await page.click('[data-ship-open]');
+  await page.waitForSelector('.sheet [data-ship-pick]');
+  await page.click('[data-ship-pick="b1"]');
+  await page.click('[data-ship-pick="b2"]');
+  await page.fill('[data-ship="amount"]', '38');
+  check('打運費時每張馬上顯示分多少（19、19）', (await page.textContent('[data-ship-share="b1"]')).includes('19') && (await page.textContent('[data-ship-share="b2"]')).includes('19'));
+  check('輸入運費時焦點沒有掉', await page.evaluate(() => document.activeElement && document.activeElement.dataset.ship === 'amount'));
+  await shot('22-一起到貨');
+  await page.click('[data-ship-go]');
+  const shipped = await page.evaluate(() => {
+    const d = window.__sl.state.data;
+    const fees = d.buyFees.filter((f) => f.shipId);
+    return { arrived: ['b1', 'b2'].every((id) => d.buys.find((b) => b.id === id).arrival === '已到'), amounts: fees.map((f) => f.amount), same: new Set(fees.map((f) => f.shipId)).size === 1, b1date: d.buys.find((b) => b.id === 'b1').date };
+  });
+  check('兩張都標成已到貨，各多一筆 19 的運費、同一個一起寄編號', shipped.arrived && shipped.amounts.join(',') === '19,19' && shipped.same);
+  check('一起到貨不會動到原本的下單日', shipped.b1date === SEED.buys[0].date);
+  await page.click('[data-tab="history"]');
+  await page.locator('.item[data-act="buy"][data-id="b1"]').click();
+  await page.waitForSelector('.sheet [data-ship-edit]');
+  check('詳細頁有「一起寄」：共 $38、這張分 $19，列出另一張單', (await text()).includes('超商運費共 $38，2 張單平分，這張分 $19') && (await page.locator('.sheet .item[data-act="buy"][data-id="b2"]').count()) === 1);
+  await shot('23-一起寄詳細');
+  page.once('dialog', (dl) => dl.accept('40'));
+  await page.click('[data-ship-edit]');
+  check('改運費成 40，兩張重新平分成 20、20', await page.evaluate(() => window.__sl.state.data.buyFees.filter((f) => f.shipId).map((f) => f.amount).join(',') === '20,20'));
+  await page.click('[data-quick="edit"]');
+  await page.waitForSelector('.sheet [data-save]');
+  check('編輯表單裡一起寄的運費不能直接改', (await text()).includes('運費 · 一起寄') && (await page.locator('.sheet .subitem', { hasText: '一起寄' }).locator('input').count()) === 0);
+  await page.click('.sheet [data-close]');
+  await page.locator('.item[data-act="buy"][data-id="b1"]').click();
+  // 其中一張標成已取消：它分到 0，運費改由另一張全付
+  await page.click('.sheet .item[data-act="buy"][data-id="b2"]');
+  page.once('dialog', (dl) => dl.accept());
+  await page.click('[data-quick="cancel"]');
+  check('一起寄的其中一張取消：它分到 0，另一張分到全部 40', await page.evaluate(() => { const f = window.__sl.state.data.buyFees.filter((x) => x.shipId); return f.find((x) => x.buyId === 'b1').amount === 40 && f.find((x) => x.buyId === 'b2').amount === 0; }));
+  check('取消的那張詳細頁寫「這張取消了，不分運費」', (await text()).includes('這張取消了，不分運費'));
+  // 恢復成已到：又變回平分
+  await page.click('[data-quick="edit"]');
+  await page.selectOption('.sheet [data-path="buy.arrival"]', '已到');
+  await page.click('.sheet [data-save]');
+  check('取消的單恢復後，運費又變回 20、20', await page.evaluate(() => window.__sl.state.data.buyFees.filter((f) => f.shipId).map((f) => f.amount).join(',') === '20,20'));
+  await page.click('[data-tab="history"]');
+  await page.locator('.item[data-act="buy"][data-id="b1"]').click();
+  page.once('dialog', (dl) => dl.accept());
+  await page.click('[data-ship-undo]');
+  check('取消一起寄：兩張的一起寄運費都刪掉，到貨狀態不變', await page.evaluate(() => { const d = window.__sl.state.data; return !d.buyFees.some((f) => f.shipId) && d.buys.find((b) => b.id === 'b2').arrival === '已到'; }));
+  await page.click('.sheet [data-close]');
 
   /* ----- 報表 ----- */
   await page.click('[data-tab="report"]');
@@ -184,6 +248,9 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   /* ----- 明細 ----- */
   await page.click('[data-tab="history"]');
   await shot('09-明細');
+  check('明細的小計在篩選和列表中間', await page.evaluate(() => { const c = [...document.querySelectorAll('#hist-results > .card')]; return c.length === 2 && c[0].innerText.includes('本期小計'); }));
+  const expectBuy = await page.evaluate(() => Object.values(window.Calc.paidByBuy(window.__sl.state.data)).reduce((a, b) => a + b, 0));
+  check('明細小計的買單＝真的付出去的錢（還沒付的不算）', (await page.textContent('#hist-results .card .field .amt')).replace(/[^\d]/g, '') === String(Math.round(expectBuy)));
   await page.selectOption('[data-filter="flag"]', '多帶');
   check('篩「多帶」只剩買單', (await page.locator('.kk.buy').count()) > 0 && (await page.locator('.kk.sell').count()) === 0);
   await page.selectOption('[data-filter="flag"]', '');
@@ -279,6 +346,7 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
 
   // 全新的瀏覽器（沒有任何資料）匯入同一個 zip
   const ctx2 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await stubRates(ctx2);
   const page2 = await ctx2.newPage();
   page2.on('pageerror', (e) => errors.push('[匯入頁] ' + String(e)));
   await page2.goto(BASE);
@@ -311,9 +379,38 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   check('刪掉整張單，照片也一起清掉', (await photoCount()) === 0);
   fs.rmSync(p1, { force: true }); fs.rmSync(p2, { force: true }); fs.rmSync(zipPath, { force: true });
 
+  /* ----- 舊的貨付單（到貨日空白、付款日不詳）打開再存，日期不會變成今天 ----- */
+  await page.evaluate(() => {
+    const sl = window.__sl;
+    sl.putBuy({ id: 'old1', date: '', payMethod: '貨付', paidDate: '日期不詳', currency: 'TWD', arrival: '已到', arrivedDate: '' },
+      [{ id: 'oi1', groupId: 'gA', name: '舊貨付', price: 300, qty: 1 }], []);
+    sl.openForm('buy', sl.state.data.buys.find((b) => b.id === 'old1'));
+  });
+  await page.click('.sheet [data-save]');
+  check('舊貨付單存檔後，付款日還是日期不詳、到貨日還是空白', await page.evaluate(() => { const b = window.__sl.state.data.buys.find((x) => x.id === 'old1'); return b.paidDate === '日期不詳' && b.arrivedDate === ''; }));
+  await page.evaluate(() => { window.__sl.state.data.buys = window.__sl.state.data.buys.filter((b) => b.id !== 'old1'); window.__sl.state.data.buyItems = window.__sl.state.data.buyItems.filter((i) => i.buyId !== 'old1'); window.__sl.render(); });
+
+  /* ----- 一起寄的單被刪掉：運費總額不變，改由剩下的單分 ----- */
+  await page.click('[data-tab="home"]');
+  await page.click('[data-ship-open]');
+  const cands = await page.$$eval('.sheet [data-ship-pick]', (els) => els.map((e) => e.dataset.shipPick));
+  for (const id of cands.slice(0, 3)) await page.click(`[data-ship-pick="${id}"]`);
+  await page.fill('[data-ship="amount"]', '38');
+  await page.click('[data-ship-go]');
+  const before3 = await page.evaluate(() => window.__sl.state.data.buyFees.filter((f) => f.shipId).map((f) => f.amount).sort().join(','));
+  const victim = cands[cands.length > 2 ? 2 : 1];
+  await page.click('[data-tab="history"]');
+  await page.locator(`.item[data-act="buy"][data-id="${victim}"]`).click();
+  await page.click('[data-quick="edit"]');
+  page.once('dialog', (dl) => dl.accept());
+  await page.click('.sheet [data-delete]');
+  const after = await page.evaluate(() => window.__sl.state.data.buyFees.filter((f) => f.shipId).map((f) => f.amount).sort().join(','));
+  check(`刪掉一起寄的其中一張（${cands.length >= 3 ? '14,12,12' : '19,19'} → 剩下的平分 38）`, (cands.length >= 3 ? before3 === '12,12,14' && after === '19,19' : before3 === '19,19' && after === '38'));
+
   /* ----- 設定、主題 ----- */
   await page.click('#btn-gear');
   await page.waitForSelector('.sheet [data-theme-pick]');
+  check('設定頁寫出估算用的匯率（1 台幣 ≈ 40 韓元）', (await text()).includes('1 台幣 ≈ 40 韓元'));
   check('設定頁的「對象」預設收合', (await page.locator('[data-act="edit-simple"][data-kind="parties"]').count()) === 0);
   await page.click('[data-collapse="parties"]');
   check('點標題可以展開', (await page.locator('[data-act="edit-simple"][data-kind="parties"]').count()) === 4);

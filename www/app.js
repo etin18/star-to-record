@@ -8,15 +8,16 @@
 'use strict';
 
 const C = window.Calc;
-const FRONT_VERSION = 'v5';
-const BACKEND_NEEDED = 3;   // 前端需要的最低後端版本（v2 起多一欄「照片」，v3 起買單多一欄「喊單日」）
+const FRONT_VERSION = 'v7';
+const BACKEND_NEEDED = 4;   // 前端需要的最低後端版本（v2 照片、v3 喊單日、v4 品項的多付／二補與費用的「一起寄」）
 const ENTITIES = ['groups', 'members', 'releases', 'accounts', 'parties', 'options', 'buys', 'buyItems', 'buyFees', 'sells', 'expenses'];
 const FLAGS = ['多帶', '重複', '自留'];
 const PAY_BUY = ['匯款', '貨付', '刷卡', '現金'];
 const PAY_SELL = ['匯款', '取貨付款', '現金'];
 const ARRIVAL = ['未到', '已到', '已取消'];
 const SHIP_STATUS = ['未寄', '已寄', '已取貨'];
-const FEE_KINDS = ['運費', '包手', '匯款手續費', '刷卡手續費', '後補款', '其他'];
+const FEE_KINDS = ['運費', '包手', '匯款手續費', '刷卡手續費', '整單二補', '其他'];
+const RENAMED_FEES = { 後補款: '整單二補' };   // 舊名稱 → 新名稱。試算表裡的舊紀錄讀進來就換成新名字
 const DEFAULT_OPTIONS = {
   ship: ['賣貨便', '交貨便', '面交', '宅配'],
   expcat: ['演唱會', '周邊', '交通', '住宿', '餐飲', '其他']
@@ -70,6 +71,41 @@ const state = {
 ENTITIES.forEach((e) => { state.data[e] = []; });
 Object.assign(state.data, jsonGet('sl.data', {}));
 ENTITIES.forEach((e) => { if (!Array.isArray(state.data[e])) state.data[e] = []; });
+
+/* ---------- 匯率：外幣單還沒填實付台幣時，先用今天的匯率估台幣 ----------
+   每天抓一次（免費的公開匯率，只送「要台幣匯率」這個請求，不會帶任何紀錄出去）。
+   抓不到就用上次抓到的；從來沒抓到過就用下面的預設值。
+   掛在 state.data.rates 給 calc.js 用，但設成不可列舉，不會跟紀錄一起存進手機或匯出檔。 */
+const DEFAULT_RATES = { KRW: 41.2, JPY: 4.84, USD: 0.0307 };   // 1 台幣＝多少外幣（2026-11 初的匯率）
+const RATE_URLS = ['https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/twd.json',
+  'https://latest.currency-api.pages.dev/v1/currencies/twd.json'];
+let rateInfo = jsonGet('sl.rates', null) || { day: '', asOf: '', rates: {} };
+rateInfo.rates = Object.assign({}, DEFAULT_RATES, rateInfo.rates);
+Object.defineProperty(state.data, 'rates', { get: () => rateInfo.rates, enumerable: false });
+async function fetchRates() {
+  if (rateInfo.day === todayStr() || !navigator.onLine) return;
+  for (const url of RATE_URLS) {
+    try {
+      const json = await (await fetch(url, { cache: 'no-store' })).json();
+      const t = json && json.twd;
+      const rates = {};
+      Object.keys(DEFAULT_RATES).forEach((c) => { const v = Number(t && t[c.toLowerCase()]); if (v > 0) rates[c] = v; });
+      if (!Object.keys(rates).length) continue;
+      rateInfo = { day: todayStr(), asOf: String(json.date || todayStr()), rates: Object.assign({}, DEFAULT_RATES, rates) };
+      lsSet('sl.rates', JSON.stringify(rateInfo));
+      render();
+      return;
+    } catch (e) { /* 換下一個來源，都失敗就沿用上次的 */ }
+  }
+}
+const rateText = () => ['KRW', 'JPY'].map((c) => `${Number(rateInfo.rates[c].toFixed(2))} ${C.CURRENCIES[c]}`).join('、');
+
+/** 讀進資料後整理舊格式：「後補款」改叫「整單二補」；品項的「貨付＋」已經停用（改成多付／二補），拿掉 */
+function normalizeData() {
+  state.data.buyFees.forEach((f) => { if (RENAMED_FEES[f.kind]) f.kind = RENAMED_FEES[f.kind]; });
+  state.data.buyItems.forEach((i) => { delete i.cod; });
+}
+normalizeData();
 
 let IDX = null;
 const idx = () => IDX || (IDX = C.index(state.data));
@@ -187,6 +223,7 @@ async function pull() {
   try {
     const json = await call({ action: 'list' });
     ENTITIES.forEach((e) => { state.data[e] = json[e] || []; });
+    normalizeData();
     saveLocal();
     setSync('ok');
     ensureDefaults();
@@ -249,7 +286,7 @@ const memberNames = (item) => {
 };
 const buyTotal = (buy) => {
   const { items, fees } = buyParts(buy.id);
-  return C.buyGoods(buy, items) + C.feesSum(fees.filter((f) => f.paid));
+  return C.buyGoods(buy, items, state.data.rates) + C.feesSum(fees.filter((f) => f.paid));
 };
 /** 列表上的標題：這張單買了什麼（品項最重要）。最多列兩個，其餘用「等 N 項」 */
 const buyLabel = (buy) => {
@@ -769,21 +806,42 @@ function todoRow(act, id, title, sub, amount, cls) {
   if (act === 'buy') { const b = idx().buys[id]; if (b) sub = joinDot(b.partyName || '（未填賣家）', sub); }
   return `<div class="item" data-act="${act}" data-id="${id}"><div class="main"><div class="t wrap">${esc(title)}</div><div class="s">${esc(sub)}</div></div><div class="amt ${cls || ''}">${amount}</div></div>`;
 }
-function todoCard(title, rows) {
-  return rows.length ? `<div class="card"><h3>${title} <span class="badge">${rows.length}</span></h3>${rows.join('')}</div>` : '';
+/** 首頁一張買單的金額（含跟商品款一起付的運費等）：外幣單還沒填實付台幣就用匯率估，前面加「約」；連匯率都沒有才顯示原幣別 */
+function buyAmount(buy) {
+  const items = buyParts(buy.id).items;
+  if (!C.isTwd(buy.currency) && !C.buyGoods(buy, items, state.data.rates)) return foreign(C.itemsSum(items), buy.currency);
+  return (C.isEstimated(buy) ? '約 ' : '') + money(buyTotal(buy));
+}
+/** 首頁最上面：待付（之後還要付出去的，好先把錢留起來）和待收（賣單還沒收到的錢），只顯示兩個數字 */
+function dueCard() {
+  const due = C.dueSummary(state.data);
+  const recv = C.receivable(state.data);
+  if (!due.total && !due.unknown && !recv.total) return '';
+  return `<div class="card due">
+    <div class="due-col"><small>待付</small><b class="${due.total ? 'out' : ''}">${money(due.total)}</b></div>
+    <div class="due-col"><small>待收</small><b class="${recv.total ? 'in' : ''}">${money(recv.total)}</b></div>
+  </div>`;
+}
+function todoCard(title, rows, extra) {
+  return rows.length ? `<div class="card"><h3>${title} <span class="badge">${rows.length}</span>${extra || ''}</h3>${rows.join('')}</div>` : '';
 }
 
 function viewHome() {
   const t = C.todos(state.data, todayStr());
+  // 「一起到貨」：有兩張以上還沒到的單才出現。放在「還沒到貨」那組，沒有的話放「預購中」
+  const shipBtn = shipCandidates().length >= 2 ? '<button class="link h3-act" data-ship-open>一起到貨</button>' : '';
+  const old = backendTooOld();
   const cards = [
-    todoCard('還沒付', t.unpaid.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(x.buy.date && mmdd(x.buy.date) + ' 下單', x.buy.payMethod, x.days != null && `已 ${x.days} 天`), money(x.total)))),
-    todoCard('還沒到貨', t.notArrived.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(x.buy.paidDate ? '已付款 ' + mmdd(x.buy.paidDate) : x.buy.payMethod, x.days != null && `等了 ${x.days} 天`, x.cod > 0 && `取貨要付 ${money(x.cod)}`), money(x.total)))),
-    todoCard('後補款還沒付', t.feesUnpaid.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), x.fee.kind + (x.fee.note ? ' · ' + x.fee.note : ''), x.fee.amount ? money(x.fee.amount) : '？'))),
+    dueCard(),
+    old ? `<div class="card warn-card"><h3>後端還沒更新</h3><p class="hint">請先重新部署 Code.gs。部署之前，品項的多付、二補和「一起到貨」的運費存不進試算表，同步之後會不見。</p></div>` : '',
+    todoCard('還沒付', t.unpaid.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(x.buy.date && mmdd(x.buy.date) + ' 下單', x.buy.payMethod, x.days != null && `已 ${x.days} 天`), buyAmount(x.buy)))),
+    todoCard('還沒到貨', t.notArrived.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(x.buy.paidDate ? '已付款 ' + mmdd(x.buy.paidDate) : x.buy.payMethod, x.days != null && `等了 ${x.days} 天`), buyAmount(x.buy))), shipBtn),
+    todoCard('整單二補還沒付', t.feesUnpaid.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), x.fee.kind + (x.fee.note ? ' · ' + x.fee.note : ''), x.fee.amount ? money(x.fee.amount) : '？'))),
     todoCard('買家還沒匯款', t.sellUnpaid.map((x) => todoRow('sell', x.sell.id, `${x.sell.partyName || '（未填買家）'} · ${x.sell.content || ''}`, [mmdd(x.sell.date), x.sell.shipMethod].filter(Boolean).join(' · '), money(x.sell.amount), 'in'))),
     todoCard('還沒寄', t.notShipped.map((x) => todoRow('sell', x.sell.id, `${x.sell.partyName || '（未填買家）'} · ${x.sell.content || ''}`, [mmdd(x.sell.date), x.sell.shipMethod || '未選寄送方式'].join(' · '), money(x.sell.amount), 'in'))),
-    todoCard('待確認', t.pending.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), `實付台幣還沒填 · ${C.CURRENCIES[x.buy.currency] || ''}單`, '？'))),
-    todoCard('預購中', t.preorder.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(`預計 ${x.buy.expectedMonth} 到貨`, x.cod > 0 && `取貨要付 ${money(x.cod)}`), money(x.total)))),
-    todoCard('還沒下單', t.notOrdered.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(`喊單 ${mmdd(x.buy.callDate)}`, x.days != null && `已 ${x.days} 天`), money(x.total))))
+    todoCard('待確認', t.pending.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), `實付台幣還沒填 · ${C.CURRENCIES[x.buy.currency] || ''}單`, buyAmount(x.buy)))),
+    todoCard('預購中', t.preorder.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), `預計 ${x.buy.expectedMonth} 到貨`, buyAmount(x.buy))), t.notArrived.length ? '' : shipBtn),
+    todoCard('還沒下單', t.notOrdered.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(`喊單 ${mmdd(x.buy.callDate)}`, x.days != null && `已 ${x.days} 天`), buyAmount(x.buy))))
   ].filter(Boolean);
 
   const recent = [...state.data.buys.map((b) => ({ d: b.date || b.callDate, html: histRow('buy', b) })),
@@ -809,9 +867,9 @@ function histRow(kind, r) {
   if (kind === 'buy') {
     const { items } = buyParts(r.id);
     const flagged = items.some((i) => C.list(i.flags).includes('多帶'));
-    const dim = C.isCancelled(r);
+    const dim = isVoidBuy(r);
     const sub = joinDot(r.partyName || '（未填賣家）', r.date ? mmdd(r.date) : r.callDate ? `喊單 ${mmdd(r.callDate)}` : '', r.arrival === '已到' ? '已到貨' : r.arrival === '已取消' ? '已取消' : '', r.paidDate ? '' : '未付');
-    return `<div class="item" data-act="buy" data-id="${r.id}" style="${dim ? 'opacity:.5' : ''}">${head}<div class="main">${label}<div class="t wrap">${esc(buyLabel(r))}</div><div class="s">${flagged ? '<span class="tag warn">多帶</span>' : ''}${photoTag(r)}${esc(sub)}</div></div><div class="amt out">${money(-buyTotal(r))}</div></div>`;
+    return `<div class="item" data-act="buy" data-id="${r.id}" style="${dim ? 'opacity:.5' : ''}">${head}<div class="main">${label}<div class="t wrap">${esc(buyLabel(r))}</div><div class="s">${flagged ? '<span class="tag warn">多帶</span>' : ''}${photoTag(r)}${esc(sub)}</div></div><div class="amt out">${C.isEstimated(r) ? '約 ' : ''}${money(-buyTotal(r))}</div></div>`;
   }
   if (kind === 'sell') {
     return `<div class="item" data-act="sell" data-id="${r.id}">${head}<div class="main">${label}<div class="t wrap">${esc(r.content || r.partyName || '（未填內容）')}</div><div class="s">${photoTag(r)}${esc(joinDot(r.content && (r.partyName || '（未填買家）'), mmdd(r.date), r.paidDate ? '已收款' : '未收款', r.shipStatus))}</div></div><div class="amt in">${money(r.amount, true)}</div></div>`;
@@ -854,10 +912,12 @@ function viewReport() {
   const spare = C.spareCounts(state.data);
   const flows = C.accountFlows(state.data, period);
   const accountIds = state.data.accounts.map((a) => a.id).filter((id) => flows[id]);
+  const est = C.events(state.data).filter((e) => e.estimated && (!period || C.ym(e.date) === period)).length;
 
   return `
     <div class="seg" style="margin-top:6px"><button data-period="month" class="${period ? 'on' : ''}">單月</button><button data-period="all" class="${period ? '' : 'on'}">全部</button></div>
     ${period ? `<div class="title-row"><button class="ico" data-month="-1" aria-label="上個月">‹</button><h2 style="text-align:center">${period.replace('-', ' 年 ')} 月</h2><button class="ico" data-month="1" aria-label="下個月">›</button></div>` : ''}
+    ${est ? `<p class="hint" style="margin:0 2px 8px">有 ${est} 張外幣單還沒填實付台幣，先用今天的匯率估算（1 台幣 ≈ ${rateText()}）。填了實付台幣就會改用實際金額。</p>` : ''}
     <div class="sum">
       <div class="card"><small>花</small><b class="out">${money(s.spend)}</b></div>
       <div class="card"><small>收</small><b class="in">${money(s.income)}</b></div>
@@ -936,14 +996,19 @@ const sel = (name, cur, options, blank) => `<select data-filter="${name}">${blan
 /** 明細下半部：列表與小計。搜尋時只重畫這一塊，輸入框不動，才不會一打字就失焦（中文輸入法也不會被打斷） */
 function historyResultsHtml() {
   const rows = applyFilter();
+  const paid = C.paidByBuy(state.data);
   let buy = 0, sell = 0, exp = 0;
-  rows.forEach((x) => { if (x.kind === 'buy') buy += x.amount; else if (x.kind === 'sell') sell += x.amount; else exp += x.amount; });
+  rows.forEach((x) => {
+    if (x.kind === 'buy') buy -= paid[x.r.id] || 0;
+    else if (x.kind === 'sell') sell += x.amount; else exp += x.amount;
+  });
   return `
-    <div class="card">${rows.length ? rows.map((x) => histRow(x.kind, x.r)).join('') : '<p class="hint">這段期間沒有符合的紀錄</p>'}</div>
     <div class="card"><h3>本期小計</h3>
       <div class="field"><span>買單</span><span class="amt">${money(buy)}</span></div>
       <div class="field"><span>賣單</span><span class="amt in">${money(sell, true)}</span></div>
-      <div class="field"><span>花費</span><span class="amt">${money(exp)}</span></div></div>`;
+      <div class="field"><span>花費</span><span class="amt">${money(exp)}</span></div>
+      <p class="hint" style="margin-top:4px">只算真的付出去、收進來的錢：還沒付的、取消的單不算，賣單要收到錢才算。</p></div>
+    <div class="card">${rows.length ? rows.map((x) => histRow(x.kind, x.r)).join('') : '<p class="hint">這段期間沒有符合的紀錄</p>'}</div>`;
 }
 
 function viewHistory() {
@@ -1098,24 +1163,27 @@ function newBuy() {
   };
 }
 function emptyItem(prev) {
-  return { id: '', groupId: prev ? prev.groupId : (state.data.groups[0] ? state.data.groups[0].id : ''), releaseId: prev ? prev.releaseId : '', memberIds: '', isSet: false, channelId: prev ? prev.channelId : '', name: '', price: '', qty: 1, cod: '', flags: '', cancelled: false };
+  return { id: '', groupId: prev ? prev.groupId : (state.data.groups[0] ? state.data.groups[0].id : ''), releaseId: prev ? prev.releaseId : '', memberIds: '', isSet: false, channelId: prev ? prev.channelId : '', name: '', price: '', qty: 1, extra: '', second: '', flags: '', cancelled: false };
 }
 
 function saveLabel() {
   const m = form.model;
-  const goods = C.isTwd(m.buy.currency) ? C.itemsSum(m.items) : C.num(m.buy.paidTwd);
+  const goods = C.buyGoods(m.buy, m.items, state.data.rates);
   const feeAll = m.fees.filter((f) => f.paid).reduce((s, f) => s + C.num(f.amount), 0);
   if (state.mask) return '存起來';
-  const tail = C.isTwd(m.buy.currency) ? money(goods + feeAll) : `${foreign(C.itemsSum(m.items), m.buy.currency)} → ${money(goods + feeAll)}`;
+  const tail = C.isTwd(m.buy.currency) ? money(goods + feeAll) : `${foreign(C.itemsSum(m.items), m.buy.currency)} → ${C.isEstimated(m.buy) ? '約 ' : ''}${money(goods + feeAll)}`;
   return `存起來 · 合計 ${tail}`;
 }
-/** 打字時只更新小計與合計，不重畫整頁 —— 重畫會把正在點的按鈕換掉，點擊就落空 */
-/** 品項小計的文字：有貨付＋就註明其中取貨時付多少 */
+/** 品項小計的文字：有多付或二補就把算式列出來，例如「(400＋30＋70)×4 ＝ $2,000」 */
 function subText(it) {
   const cur = form.model.buy.currency;
-  const cod = C.codOf(form.model.buy, it);
-  return foreign(C.itemTotal(it), cur) + (cod ? `（取貨付 ${money(cod)}）` : '');
+  const total = foreign(C.itemTotal(it), cur);
+  if (!C.num(it.extra) && !C.num(it.second) || state.mask) return total;
+  const n = (v) => (C.num(v) || 0).toLocaleString('en-US');
+  const parts = [n(it.price), C.num(it.extra) && n(it.extra), C.num(it.second) && n(it.second)].filter(Boolean).join('＋');
+  return `(${parts})×${n(it.qty)} ＝ ${total}`;
 }
+/** 打字時只更新小計與合計，不重畫整頁 —— 重畫會把正在點的按鈕換掉，點擊就落空 */
 function updateTotals() {
   if (!form || form.kind !== 'buy') return;
   form.model.items.forEach((it, i) => {
@@ -1186,11 +1254,11 @@ function buyFormHtml() {
       <button class="btn ghost" data-add-item style="margin-bottom:10px">＋ 新增一行（回歸、通路會自動帶入）</button>
 
       <div class="card"><h3>費用</h3>
-        ${m.fees.map((f, i) => `<div class="subitem"><div class="head"><span>${esc(f.kind)}</span><button class="x" data-del-fee="${i}" aria-label="刪除">✕</button></div>
+        ${m.fees.map((f, i) => f.shipId ? shipFeeLocked(f) : `<div class="subitem"><div class="head"><span>${esc(f.kind)}</span><button class="x" data-del-fee="${i}" aria-label="刪除">✕</button></div>
           ${fSelect('類別', `fees.${i}.kind`, FEE_KINDS.map((x) => [x, x]))}
-          ${fInput('金額', `fees.${i}.amount`, 'number', f.kind === '後補款' ? '還不知道就空著' : '')}
+          ${fInput('金額', `fees.${i}.amount`, 'number', f.kind === '整單二補' ? '還不知道就空著' : '')}
           ${fCheck('已付', `fees.${i}.paid`)}
-          ${fInput('備註', `fees.${i}.note`, 'text', f.kind === '後補款' ? '例如國際運費、尾款' : '')}</div>`).join('')}
+          ${fInput('備註', `fees.${i}.note`, 'text', f.kind === '整單二補' ? '例如國際運費、尾款' : '')}</div>`).join('')}
         <button class="btn ghost small" data-add-fee style="margin-top:6px">＋ 新增費用</button>
       </div>
 
@@ -1201,6 +1269,8 @@ function buyFormHtml() {
     </div>`;
 }
 
+/** 試算表把空白數字讀成 0；多付、二補是選填，0 就顯示成空白 */
+const blankZero = (v) => (v === '' || v == null || v === 0 || v === '0' ? '' : v);
 function itemHtml(it, i) {
   const gid = it.groupId;
   const ids = C.list(it.memberIds);
@@ -1216,7 +1286,7 @@ function itemHtml(it, i) {
     ${fSelect('通路', `items.${i}.channelId`, optionList('channel'), '（不指定）', 'channel')}
     ${fInput('品項', `items.${i}.name`, 'text', '例如 簽售卡 1.0、空專', `list="item-names"`)}
     <div class="field"><label>單價 × 數量</label><span class="pq"><input data-path="items.${i}.price" type="number" inputmode="decimal" step="any" value="${esc(it.price)}" placeholder="0"><i>×</i><input data-path="items.${i}.qty" type="number" inputmode="decimal" step="any" value="${esc(it.qty)}"></span></div>
-    ${form.model.buy.payMethod !== '貨付' && C.isTwd(form.model.buy.currency) ? fInput('貨付＋', `items.${i}.cod`, 'number', '取貨時才付的金額（含在單價內）') : ''}
+    <div class="field"><label>多付 ＋ 二補</label><span class="pq two"><input data-path="items.${i}.extra" type="number" inputmode="decimal" step="any" value="${esc(blankZero(it.extra))}" placeholder="0" aria-label="多付（每個）"><i>＋</i><input data-path="items.${i}.second" type="number" inputmode="decimal" step="any" value="${esc(blankZero(it.second))}" placeholder="0" aria-label="二補（每個）"></span></div>
     <div class="chips" style="margin-top:4px">${FLAGS.map((f) => `<button class="chip warn ${flags.includes(f) ? 'on' : ''}" data-flag="${i}:${f}">${f}</button>`).join('')}</div>
     ${form.editing ? fCheck('這行已取消', `items.${i}.cancelled`) : ''}
     <div class="field"><span>小計</span><span class="amt" data-sub="${i}">${subText(it)}</span></div>
@@ -1312,7 +1382,7 @@ function validateForm() {
   if (form.kind === 'buy') {
     if (!m.items.some((i) => i.name || C.num(i.price))) return '至少要有一個品項';
     if (m.items.some((i) => (i.name || C.num(i.price)) && !i.groupId)) return '每個品項都要選團';
-    if (m.items.some((i) => C.num(i.cod) > C.itemTotal(Object.assign({}, i, { cancelled: false })))) return '貨付＋不能比這個品項的金額還大';
+    if (m.items.some((i) => C.num(i.extra) < 0 || C.num(i.second) < 0)) return '多付、二補不能是負的';
   } else if (form.kind === 'sell') {
     if (!C.num(m.amount)) return '金額要填';
   } else if (!C.num(m.amount)) return '金額要填';
@@ -1326,13 +1396,15 @@ function saveForm() {
   if (form.kind === 'buy') {
     const buy = Object.assign({}, m.buy);
     buy.partyName = nameOf('parties', buy.partyId, buy.partyName);
-    // 貨付：取貨那天才付錢；先到貨再補上付款日
-    if (buy.payMethod === '貨付') buy.paidDate = buy.arrival === '已到' ? (buy.arrivedDate || todayStr()) : '';
-    if (buy.arrival === '已到' && !buy.arrivedDate) buy.arrivedDate = todayStr();
-    const items = m.items.filter((i) => i.name || C.num(i.price)).map((i) => Object.assign({}, i, { price: C.num(i.price), qty: C.num(i.qty) || 1, cod: i.cod === '' || i.cod == null ? '' : C.num(i.cod) }));
+    // 貨付：取貨那天才付錢，付款日跟著到貨日。到貨日空白（舊資料常這樣）就保持空白，
+    // 付款日沿用原本的；原本也沒有就當作「日期不詳」——已經取貨就一定付過錢了
+    if (buy.payMethod === '貨付') buy.paidDate = buy.arrival === '已到' ? (buy.arrivedDate || buy.paidDate || C.UNKNOWN_DATE) : '';
+    const optNum = (v) => (v === '' || v == null ? '' : C.num(v));
+    const items = m.items.filter((i) => i.name || C.num(i.price)).map((i) => Object.assign({}, i, { price: C.num(i.price), qty: C.num(i.qty) || 1, extra: optNum(i.extra), second: optNum(i.second) }));
     const fees = m.fees.map((f) => Object.assign({}, f, { amount: C.num(f.amount), paidDate: f.paid ? (f.paidDate || '') : '' }));
     buy.paidTwd = C.isTwd(buy.currency) ? '' : (buy.paidTwd === '' ? '' : C.num(buy.paidTwd));
     putBuy(buy, items, fees);
+    rebalanceShipsOf(buy.id);
   } else if (form.kind === 'sell') {
     const s = Object.assign({}, m, { amount: C.num(m.amount) });
     s.partyName = nameOf('parties', s.partyId, s.partyName);
@@ -1362,15 +1434,15 @@ function detailBuy(id) {
     <div class="sheet-body">
       <div class="card">
         <div class="field"><span>下單日</span><span>${b.date ? esc(b.date) : '還沒下單'}</span></div>
-        ${(() => { const cod = C.codDue(b, items); return cod ? `<div class="field"><span>貨付＋</span><span>${money(cod)} · ${b.arrival === '已到' ? '已在到貨時付' : '到貨時付'}</span></div>` : ''; })()}
         ${b.callDate ? `<div class="field"><span>喊單日</span><span>${esc(b.callDate)}</span></div>` : ''}
         <div class="field"><span>付款</span><span>${esc(b.payMethod)}${b.accountId ? ' · ' + esc(nameOf('accounts', b.accountId)) : ''} · ${b.paidDate ? '已付 ' + mmdd(b.paidDate) : '未付'}</span></div>
         <div class="field"><span>到貨</span><span>${esc(b.arrival)}${b.arrivedDate ? ' ' + mmdd(b.arrivedDate) : ''}${b.expectedMonth && b.arrival === '未到' ? ' · 預計 ' + b.expectedMonth : ''}</span></div>
-        ${C.isTwd(cur) ? '' : `<div class="field"><span>實付台幣</span><span>${b.paidTwd ? money(b.paidTwd) : '還沒填'}</span></div>`}
-        <div class="field"><span>合計</span><span class="amt">${money(buyTotal(b))}</span></div>
+        ${C.isTwd(cur) ? '' : `<div class="field"><span>實付台幣</span><span>${C.num(b.paidTwd) ? money(b.paidTwd) : '還沒填，先用今天匯率估'}</span></div>`}
+        <div class="field"><span>合計</span><span class="amt">${C.isEstimated(b) ? '約 ' : ''}${money(buyTotal(b))}</span></div>
         ${b.note ? `<div class="field col"><span>備註</span><span>${esc(b.note)}</span></div>` : ''}
       </div>
-      <div class="card"><h3>品項</h3>${items.map((i) => `<div class="item" style="cursor:default"><div class="main"><div class="t">${esc(i.name || '（未命名）')}</div><div class="s">${C.codOf(b, i) ? `<span class="tag">貨付＋ ${money(C.codOf(b, i))}</span>` : ''}${C.list(i.flags).map((f) => `<span class="tag warn">${f}</span>`).join('')}${i.cancelled ? '<span class="tag">已取消</span>' : ''}${esc([nameOf('groups', i.groupId), nameOf('releases', i.releaseId), optionName(i.channelId), memberNames(i)].filter(Boolean).join(' · '))}</div></div><div class="amt">${foreign(C.itemTotal(i), cur)}</div></div>`).join('')}</div>
+      <div class="card"><h3>品項</h3>${items.map((i) => `<div class="item" style="cursor:default"><div class="main"><div class="t">${esc(i.name || '（未命名）')}</div><div class="s">${C.list(i.flags).map((f) => `<span class="tag warn">${f}</span>`).join('')}${i.cancelled ? '<span class="tag">已取消</span>' : ''}${esc([nameOf('groups', i.groupId), nameOf('releases', i.releaseId), optionName(i.channelId), memberNames(i)].filter(Boolean).join(' · '))}</div>${unitLine(i, cur)}</div><div class="amt">${foreign(C.itemTotal(i), cur)}</div></div>`).join('')}</div>
+      ${shipCard(b)}
       ${photoStrip(b)}
       ${fees.length ? `<div class="card"><h3>費用</h3>${fees.map((f) => `<div class="item" style="cursor:default"><div class="main"><div class="t">${esc(f.kind)} ${f.paid ? '' : '<span class="tag warn">未付</span>'}</div><div class="s">${esc(f.note || '')}</div></div><div class="amt">${f.amount ? money(f.amount) : '？'}</div>${f.paid ? '' : `<button class="btn small" data-fee-paid="${f.id}">已付</button>`}</div>`).join('')}</div>` : ''}
       <div class="btn-row">
@@ -1378,12 +1450,135 @@ function detailBuy(id) {
         ${!b.paidDate && b.payMethod !== '貨付' ? '<button class="btn" data-quick="paid">標示已付款</button>' : ''}
         ${b.arrival === '未到' ? '<button class="btn" data-quick="arrived">標示已到貨</button>' : ''}
       </div>
+      ${b.arrival === '未到' && isShipCandidate(b) && shipCandidates().length >= 2 ? '<div class="btn-row"><button class="btn ghost" data-quick="together">跟別張單一起到貨（平分運費）</button></div>' : ''}
       <div class="btn-row">
         <button class="btn ghost" data-quick="edit">編輯</button>
         <button class="btn ghost" data-quick="copy">複製成新單</button>
         ${b.arrival !== '已取消' ? '<button class="btn ghost" data-quick="cancel">標示已取消</button>' : ''}
       </div>
     </div>`;
+}
+
+/* ==========================================================================
+   一起到貨：好幾張單一起寄到超商，超商運費平分到每張單上
+   每張單還是各自一張（喊單日、下單日、付款日、賣家都不動），
+   只是各多一筆「運費 · 一起寄」，同一批的費用帶著同一個 shipId，之後改運費才找得到彼此。
+   ========================================================================== */
+const clone = (x) => Object.assign({}, x);
+/** 排序固定（下單日舊的在前），平分時「零頭放第一張」才每次都是同一張 */
+const byOrderDate = (a, b) => String(a.date || a.callDate || '').localeCompare(String(b.date || b.callDate || '')) || String(a.id).localeCompare(String(b.id));
+/** 可以一起到貨的單：還沒到、沒取消、已經下單的 */
+const isShipCandidate = (b) => !isVoidBuy(b) && b.arrival === '未到' && !(b.callDate && !b.date);
+const shipCandidates = () => state.data.buys.filter(isShipCandidate).sort(byOrderDate);
+const shipFees = (shipId) => state.data.buyFees.filter((f) => f.shipId === shipId);
+const shipTotal = (shipId) => shipFees(shipId).reduce((n, f) => n + C.num(f.amount), 0);
+const shipBuys = (shipId) => [...new Set(shipFees(shipId).map((f) => f.buyId))].map((id) => idx().buys[id]).filter(Boolean).sort(byOrderDate);
+const backendTooOld = () => !!state.sync.backend && Number(String(state.sync.backend).slice(1)) < BACKEND_NEEDED;
+
+let shipForm = null;   // { date, amount, ids }
+function openShip(ids) {
+  shipForm = { date: todayStr(), amount: '', ids: ids || [] };
+  openSheet('ship', shipSheet);
+}
+/** 勾起來的單與各自分到的運費 */
+function shipPlan() {
+  const picked = shipCandidates().filter((b) => shipForm.ids.includes(b.id));
+  const total = C.num(shipForm.amount);
+  const shares = C.splitEven(total, picked.length);
+  return { picked, total, share: (id) => { const k = picked.findIndex((b) => b.id === id); return k >= 0 && total > 0 ? shares[k] : null; } };
+}
+const shipGoLabel = (plan) => (plan.picked.length >= 2 && plan.total > 0 ? `${plan.picked.length} 張標成已到貨 · 運費共 ${money(plan.total)}` : '標成已到貨');
+function shipSheet() {
+  const f = shipForm;
+  const plan = shipPlan();
+  return `
+    ${sheetTop('一起到貨', '取消')}
+    <div class="sheet-body">
+      <p class="hint" style="margin:0 2px 10px">一起寄到超商的單，選起來一次標成已到貨，超商運費平分到每張單上（除不盡的零頭放第一張）。每張單的喊單日、下單日、付款日都不會變。</p>
+      <div class="card">
+        <div class="field"><label>到貨日</label><input type="date" data-ship="date" value="${esc(f.date)}"></div>
+        <div class="field"><label>超商運費（共）</label><input type="number" inputmode="decimal" step="any" data-ship="amount" value="${esc(f.amount)}" placeholder="例如 38"></div>
+      </div>
+      <div class="card"><h3>選要一起到的單 <span class="badge" style="background:var(--muted)">${plan.picked.length}</span></h3>
+        ${shipCandidates().map((b) => { const sh = plan.share(b.id); return `<div class="item pickrow ${f.ids.includes(b.id) ? 'on' : ''}" data-ship-pick="${b.id}"><span class="pick" aria-hidden="true">✓</span><div class="main"><div class="t wrap">${esc(buyLabel(b))}</div><div class="s">${esc(joinDot(b.partyName || '（未填賣家）', b.date && mmdd(b.date) + ' 下單', b.expectedMonth && `預計 ${b.expectedMonth}`))}</div></div><div class="amt" data-ship-share="${b.id}">${sh != null ? '分 ' + money(sh) : ''}</div></div>`; }).join('')}
+      </div>
+      <button class="btn" data-ship-go>${shipGoLabel(plan)}</button>
+    </div>`;
+}
+/** 打運費時只更新每張分多少，不重畫（重畫會收鍵盤） */
+function updateShipShares() {
+  const plan = shipPlan();
+  document.querySelectorAll('[data-ship-share]').forEach((el) => { const sh = plan.share(el.dataset.shipShare); el.textContent = sh != null ? '分 ' + money(sh) : ''; });
+  const btn = document.querySelector('[data-ship-go]');
+  if (btn) btn.textContent = shipGoLabel(plan);
+}
+function shipGo() {
+  const plan = shipPlan();
+  if (plan.picked.length < 2) return toast('至少選兩張單');
+  if (!(plan.total > 0)) return toast('超商運費要填');
+  if (!shipForm.date) return toast('到貨日要填');
+  const date = shipForm.date;
+  const shipId = uid();
+  plan.picked.forEach((b) => {
+    const { items, fees } = buyParts(b.id);
+    // 貨付的單：取貨那天才付錢，所以付款日跟著到貨日
+    const buy = Object.assign({}, b, { arrival: '已到', arrivedDate: date, paidDate: b.payMethod === '貨付' ? date : b.paidDate });
+    putBuy(buy, items.map(clone), fees.map(clone).concat({ id: '', kind: '運費', amount: plan.share(b.id), paid: true, paidDate: date, note: '一起寄', shipId }));
+  });
+  closeSheet('ship');
+  shipForm = null;
+  render();
+  toast(`${plan.picked.length} 張單標成已到貨，運費分好了`);
+}
+const isVoidBuy = (b) => C.isVoid(b, buyParts(b.id).items);
+/**
+ * 照總額重新平分給同一批「還算數」的單：運費總額改了、其中一張被刪掉、被取消（或取消後又恢復）都走這裡。
+ * 取消的單分到 0，錢不會跟著消失；全部都取消了就不動。金額沒變的單不重存，免得白白送一次試算表。
+ */
+function resplitShip(shipId, total) {
+  const buys = shipBuys(shipId);
+  const live = buys.filter((b) => !isVoidBuy(b));
+  if (!live.length) return;
+  const shares = C.splitEven(total, live.length);
+  buys.forEach((b) => {
+    const k = live.indexOf(b);
+    const amount = k >= 0 ? shares[k] : 0;
+    const { items, fees } = buyParts(b.id);
+    if (fees.every((f) => f.shipId !== shipId || C.num(f.amount) === amount)) return;
+    putBuy(Object.assign({}, b), items.map(clone), fees.map((f) => Object.assign({}, f, f.shipId === shipId ? { amount } : {})));
+  });
+}
+/** 這張單存過之後（可能剛取消或恢復），同一批一起寄的運費重新平分 */
+function rebalanceShipsOf(buyId) {
+  [...new Set(buyParts(buyId).fees.filter((f) => f.shipId).map((f) => f.shipId))].forEach((sid) => resplitShip(sid, shipTotal(sid)));
+}
+function undoShip(shipId) {
+  shipBuys(shipId).forEach((b) => {
+    const { items, fees } = buyParts(b.id);
+    putBuy(Object.assign({}, b), items.map(clone), fees.filter((f) => f.shipId !== shipId).map(clone));
+  });
+}
+/** 詳細頁：這張單跟哪幾張一起寄、各分多少 */
+function shipCard(b) {
+  const fee = buyParts(b.id).fees.find((f) => f.shipId);
+  if (!fee) return '';
+  const all = shipFees(fee.shipId);
+  const mates = shipBuys(fee.shipId).filter((o) => o.id !== b.id);
+  const live = shipBuys(fee.shipId).filter((o) => !isVoidBuy(o)).length;
+  const shareOf = (o) => all.filter((f) => f.buyId === o.id).reduce((n, f) => n + C.num(f.amount), 0);
+  return `<div class="card"><h3>一起寄</h3>
+    <p class="hint" style="margin-bottom:4px">${/^\d{4}-/.test(fee.paidDate) ? mmdd(fee.paidDate) + ' 到貨，' : ''}超商運費共 ${money(shipTotal(fee.shipId))}，${live} 張單平分，${isVoidBuy(b) ? '這張取消了，不分運費' : '這張分 ' + money(fee.amount)}。取貨時付現金，不算進銀行帳戶。</p>
+    ${mates.map((o) => todoRow('buy', o.id, buyLabel(o), isVoidBuy(o) ? '已取消，不分運費' : '', money(shareOf(o)))).join('')}
+    <div class="btn-row" style="margin:8px 0 0"><button class="btn ghost" data-ship-edit="${fee.shipId}">改運費</button><button class="btn ghost" data-ship-undo="${fee.shipId}">取消一起寄</button></div>
+  </div>`;
+}
+/** 編輯表單裡的一起寄運費：不能直接改（改了其他張就對不上），請她到詳細頁改 */
+const shipFeeLocked = (f) => `<div class="subitem"><div class="head"><span>${esc(f.kind)} · 一起寄</span></div><div class="field"><span>這張分到</span><span class="amt">${money(f.amount)}</span></div><p class="hint">跟別張單一起寄的運費。要改金額，到這張單的詳細頁按「改運費」。</p></div>`;
+/** 詳細頁品項下面的算式：有多付或二補才出現 */
+function unitLine(i, cur) {
+  if (!C.num(i.extra) && !C.num(i.second)) return '';
+  const parts = [`單價 ${foreign(i.price, cur)}`, C.num(i.extra) && `多付 ${foreign(i.extra, cur)}`, C.num(i.second) && `二補 ${foreign(i.second, cur)}`].filter(Boolean);
+  return `<div class="s wrap-s">${esc(parts.join(' ＋ '))}，× ${esc(C.num(i.qty))}</div>`;
 }
 
 function detailSell(id) {
@@ -1499,7 +1694,7 @@ function settingsSheet() {
         <button class="btn danger" data-clear-photos>清除這支手機上的照片</button>
       </div>
 
-      <div class="card"><h3>關於</h3><p class="hint">STAR TO RECORD ${FRONT_VERSION} · 後端 ${esc(state.sync.backend || '—')}</p>${state.sync.backend && Number(state.sync.backend.slice(1)) < BACKEND_NEEDED ? '<p class="hint" style="color:var(--warn);margin-top:6px">後端版本太舊，請重新部署 Code.gs，才能把照片資訊同步到試算表。</p>' : ''}</div>
+      <div class="card"><h3>關於</h3><p class="hint">外幣單還沒填實付台幣時的估算匯率：1 台幣 ≈ ${rateText()}${rateInfo.asOf ? `（${esc(rateInfo.asOf)} 的匯率）` : '（預設值，連上網路後會自動更新）'}</p><p class="hint">STAR TO RECORD ${FRONT_VERSION} · 後端 ${esc(state.sync.backend || '—')}</p>${backendTooOld() ? '<p class="hint" style="color:var(--warn);margin-top:6px">後端版本太舊，請重新部署 Code.gs，不然有些欄位（照片、喊單日、多付、二補、一起寄）存不進試算表。</p>' : ''}</div>
     </div>`;
 }
 
@@ -1540,7 +1735,7 @@ function editSimple(kind, id) {
    事件
    ========================================================================== */
 document.addEventListener('click', async (ev) => {
-  const t = ev.target.closest('button, [data-act], [data-tab]');
+  const t = ev.target.closest('button, [data-act], [data-tab], [data-ship-pick]');
   if (!t) return;
   const d = t.dataset;
 
@@ -1566,6 +1761,7 @@ document.addEventListener('click', async (ev) => {
   if (d.filterToggle) { state.filter.allTime = !state.filter.allTime; return render(); }
 
   /* ----- 列表上的點擊 ----- */
+  if (t.hasAttribute('data-ship-open')) return openShip([]);
   if (d.act === 'buy') { detailId = d.id; return openSheet('detail', () => detailBuy(d.id)); }
   if (d.act === 'sell') { detailId = d.id; return openSheet('detail', () => detailSell(d.id)); }
   if (d.act === 'expense') return openForm('expense', state.data.expenses.find((e) => e.id === d.id));
@@ -1598,7 +1794,13 @@ document.addEventListener('click', async (ev) => {
   if (t.hasAttribute('data-delete') && sheetId === 'form') {
     if (!confirm('確定刪除？（這張單的照片也會一起刪掉）')) return;
     form.removed = []; form.added = [];
-    if (form.kind === 'buy') delBuy(form.model.buy.id); else del(form.kind === 'sell' ? 'sells' : 'expenses', form.model.id);
+    if (form.kind === 'buy') {
+      // 一起寄的單被刪掉：運費總額不變，改由同一批剩下的單平分
+      const id = form.model.buy.id;
+      const groups = [...new Set(buyParts(id).fees.filter((f) => f.shipId).map((f) => f.shipId))].map((sid) => [sid, shipTotal(sid)]);
+      delBuy(id);
+      groups.forEach(([sid, total]) => resplitShip(sid, total));
+    } else del(form.kind === 'sell' ? 'sells' : 'expenses', form.model.id);
     form = null; closeSheet('form'); closeSheet('detail'); render(); return toast('已刪除');
   }
 
@@ -1608,6 +1810,7 @@ document.addEventListener('click', async (ev) => {
   }
   if (sheetId === 'form') return formClick(t, d);
   if (sheetId === 'detail') return detailClick(t, d);
+  if (sheetId === 'ship') return shipClick(t, d);
   if (sheetId === 'settings' || sheetId === 'group-edit') return settingsClick(t, d);
 });
 
@@ -1668,18 +1871,33 @@ function detailClick(t, d) {
     patchFee(fee, { paid: true, paidDate: todayStr() });
     return render();
   }
+  if (d.shipEdit) {
+    const n = shipBuys(d.shipEdit).filter((b) => !isVoidBuy(b)).length;
+    const v = prompt(`超商運費共多少？（${n} 張單平分）`, shipTotal(d.shipEdit));
+    if (v === null) return;
+    const total = Number(v);
+    if (!(total > 0)) return toast('運費要大於 0；不想分攤就按「取消一起寄」');
+    resplitShip(d.shipEdit, total);
+    return render();
+  }
+  if (d.shipUndo) {
+    if (!confirm('取消一起寄？這幾張單上「一起寄」的運費會刪掉，到貨狀態不變。')) return;
+    undoShip(d.shipUndo);
+    return render();
+  }
   if (!d.quick) return;
+  if (d.quick === 'together') return openShip([id]);
   if (isBuy) {
     const b = idx().buys[id];
     if (d.quick === 'ordered') patchBuy(id, { date: todayStr() });
     if (d.quick === 'paid') patchBuy(id, { paidDate: todayStr() });
     if (d.quick === 'arrived') patchBuy(id, { arrival: '已到', arrivedDate: todayStr(), paidDate: b.payMethod === '貨付' ? todayStr() : b.paidDate });
-    if (d.quick === 'cancel') { if (!confirm('這張單標成已取消？取消後不會計入花費。')) return; patchBuy(id, { arrival: '已取消' }); }
+    if (d.quick === 'cancel') { if (!confirm('這張單標成已取消？取消後不會計入花費。')) return; patchBuy(id, { arrival: '已取消' }); rebalanceShipsOf(id); }
     if (d.quick === 'edit') { closeSheet('detail'); return openForm('buy', idx().buys[id]); }
     if (d.quick === 'copy') {
       closeSheet('detail');
       const { items, fees } = buyParts(id);
-      form = { kind: 'buy', editing: false, model: { buy: Object.assign({}, b, { id: '', date: todayStr(), paidDate: '', arrival: '未到', arrivedDate: '', createdAt: '', photoIds: '' }), items: items.map((i) => Object.assign({}, i, { id: '' })), fees: fees.map((f) => Object.assign({}, f, { id: '', paid: f.kind === '後補款' ? false : f.paid, paidDate: '' })) } };
+      form = { kind: 'buy', editing: false, model: { buy: Object.assign({}, b, { id: '', date: todayStr(), paidDate: '', arrival: '未到', arrivedDate: '', createdAt: '', photoIds: '' }), items: items.map((i) => Object.assign({}, i, { id: '' })), fees: fees.filter((f) => !f.shipId).map((f) => Object.assign({}, f, { id: '', paid: f.kind === '整單二補' ? false : f.paid, paidDate: '' })) } };
       return openSheet('form', buyFormHtml);
     }
   } else {
@@ -1696,6 +1914,15 @@ function detailClick(t, d) {
   }
   if (sheet) sheet.render = () => (isBuy ? detailBuy(id) : detailSell(id));
   render();
+}
+
+function shipClick(t, d) {
+  if (d.shipPick) {
+    const ids = shipForm.ids;
+    shipForm.ids = ids.includes(d.shipPick) ? ids.filter((x) => x !== d.shipPick) : ids.concat(d.shipPick);
+    return refreshSheets();
+  }
+  if (t.hasAttribute('data-ship-go')) return shipGo();
 }
 
 function settingsClick(t, d) {
@@ -1764,6 +1991,7 @@ function onFieldChange(ev) {
     if (k === 'groupId') state.filter.memberId = '';
     return k === 'q' ? render() : render();
   }
+  if (el.dataset.ship && shipForm) { shipForm[el.dataset.ship] = el.value; return updateShipShares(); }
   if (el.dataset.slider) {
     const k = el.dataset.slider;
     lsSet('sl.' + k, k === 'dim' ? (Number(el.value) / 100) : el.value);
@@ -1848,6 +2076,7 @@ document.addEventListener('input', (ev) => {
     return;
   }
   if (el.dataset && el.dataset.slider) return onFieldChange(ev);
+  if (el.dataset && el.dataset.ship && shipForm) { shipForm[el.dataset.ship] = el.value; return updateShipShares(); }
   if (form && el.dataset && el.dataset.path && el.tagName !== 'SELECT' && el.type !== 'checkbox' && !/date|month/.test(el.type)) {
     setPath(form.model, el.dataset.path, el.value);
     updateTotals();
@@ -1857,7 +2086,7 @@ document.addEventListener('input', (ev) => {
 /* ==========================================================================
    啟動
    ========================================================================== */
-window.addEventListener('online', () => { flush(); });
+window.addEventListener('online', () => { flush(); fetchRates(); });
 window.addEventListener('offline', renderSync);
 
 /** 開發用：網址加 ?seed=local，就把 www/_local-seed.json 灌進本機資料（只存手機本機，不送後端）。
@@ -1869,6 +2098,7 @@ async function loadLocalSeed() {
     if (!res.ok) return;
     const seed = await res.json();
     ENTITIES.forEach((e) => { state.data[e] = seed[e] || []; });
+    normalizeData();
     state.outbox = [];
     saveLocal();
     history.replaceState(null, '', location.pathname);
@@ -1885,6 +2115,7 @@ async function boot() {
   if (!state.apiUrl) ensureDefaults();
   render();
   if (state.apiUrl) pull();
+  fetchRates();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 boot();

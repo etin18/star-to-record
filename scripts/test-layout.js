@@ -44,11 +44,14 @@ const SEED = {
     { id: 'b2', date: iso(-8), partyId: 'p1', partyName: LONG + '賣家', payMethod: '刷卡', accountId: 'a1', paidDate: iso(-8), currency: 'KRW', paidTwd: 0, pending: true, arrival: '未到' }
   ],
   buyItems: [
-    { id: 'i1', buyId: 'b1', groupId: 'gA', releaseId: 'r1', memberIds: members.map((m) => m.id).join(','), channelId: 'c1', name: LONG, price: 12345678, qty: 9, flags: '多帶,重複,自留', cod: 5000 },
-    { id: 'i3', buyId: 'b3', groupId: 'gA', releaseId: 'r1', memberIds: 'm0', channelId: 'c1', name: LONG, price: 530, qty: 1, flags: '', cod: 30 },
+    { id: 'i1', buyId: 'b1', groupId: 'gA', releaseId: 'r1', memberIds: members.map((m) => m.id).join(','), channelId: 'c1', name: LONG, price: 12345678, qty: 9, flags: '多帶,重複,自留', extra: 123456, second: 654321 },
+    { id: 'i3', buyId: 'b3', groupId: 'gA', releaseId: 'r1', memberIds: 'm0', channelId: 'c1', name: LONG, price: 400, qty: 4, flags: '', extra: 30, second: 70 },
     { id: 'i2', buyId: 'b2', groupId: 'gA', releaseId: 'r1', memberIds: '', isSet: true, channelId: 'c1', name: '一套', price: 93100, qty: 1, flags: '' }
   ],
-  buyFees: [{ id: 'f1', buyId: 'b1', kind: '後補款', amount: 0, paid: false, note: LONG }],
+  buyFees: [{ id: 'f1', buyId: 'b1', kind: '整單二補', amount: 0, paid: false, note: LONG },
+    // 一起寄：b1 和 b2 分同一筆超商運費
+    { id: 'f2', buyId: 'b1', kind: '運費', amount: 9876543, paid: true, paidDate: iso(-1), note: '一起寄', shipId: 'sh1' },
+    { id: 'f3', buyId: 'b2', kind: '運費', amount: 9876543, paid: true, paidDate: iso(-1), note: '一起寄', shipId: 'sh1' }],
   sells: [{ id: 's1', date: iso(-4), partyId: 'p1', partyName: LONG + '買家', content: LONG, groupId: 'gA', amount: 9876543, payMethod: '匯款', accountId: 'a1', paidDate: '', shipMethod: '賣貨便', shipStatus: '未寄' }],
   expenses: [{ id: 'e1', date: iso(-2), category: '演唱會', content: LONG, amount: 1234567, accountId: 'a1', groupId: 'gA' }]
 };
@@ -97,6 +100,7 @@ function scan() {
   for (const theme of THEMES) {
     for (const width of WIDTHS) {
       const ctx = await browser.newContext({ viewport: { width, height: 780 } });
+      await ctx.route(/currency-api/, (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ date: '2026-11-01', twd: { krw: 40, jpy: 5, usd: 0.03 } }) }));
       const page = await ctx.newPage();
       await page.addInitScript(([seed, th]) => {
         localStorage.setItem('sl.data', JSON.stringify(seed));
@@ -130,6 +134,7 @@ function scan() {
         ['買單詳細', async () => { await page.click('.sheet [data-close]'); await page.click('[data-tab="home"]'); await page.click('[data-act="buy"][data-id="b1"]'); }],
         ['買單大圖', async () => { await page.click('.sheet .thumb'); await page.waitForTimeout(120); }],
         ['買單編輯（長資料、七張照片）', async () => { await page.click('.sheet[data-sheet="pv"] [data-close]'); await page.click('[data-quick="edit"]'); }],
+        ['一起到貨', async () => { await page.click('.sheet [data-close]'); await page.click('[data-tab="home"]'); await page.click('[data-ship-open]'); await page.click('[data-ship-pick="b1"]'); await page.click('[data-ship-pick="b2"]'); await page.fill('[data-ship="amount"]', '9876543'); }],
         ['賣單詳細', async () => { await page.click('.sheet [data-close]'); await page.click('[data-tab="home"]'); await page.click('[data-act="sell"][data-id="s1"]'); }],
         ['團明細', async () => { await page.click('.sheet [data-close]'); await page.click('[data-tab="report"]'); await page.click('[data-act="group"][data-id="gA"]'); }],
         ['收集表', async () => { await page.click('[data-act="collection"][data-id="r1"]'); }]

@@ -312,3 +312,28 @@ table.matrix small { display: block; font-size: 10px; font-weight: 400; color: v
 /* 列表第二行（賣家、回歸、日期、狀態）：比標題淡一點、小一點，讓品項名稱最醒目 */
 :root[data-theme="photo"] { --sub: rgba(255, 255, 255, .56); }
 .item .s { color: var(--sub, var(--muted)); font-size: 11.5px; }
+.item .s.wrap-s { white-space: normal; overflow: visible; }
+
+/* 品項的「多付 ＋ 二補」：跟上一列「單價 × 數量」同寬，數字才會上下對齊 */
+
+/* 卡片標題右邊的小按鈕（首頁「一起到貨」） */
+.card > h3 .h3-act { margin-left: auto; border: 0; background: none; color: var(--accent); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; padding: 2px 0; }
+
+/* 一起到貨：勾選要一起到的單 */
+.pickrow { cursor: pointer; }
+.pickrow .pick { flex: none; width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--sub, var(--muted)); display: grid; place-items: center; font-size: 12px; font-weight: 700; line-height: 1; color: transparent; }
+.pickrow.on .pick { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+/* 後端太舊的提醒 */
+.warn-card { border-color: var(--warn); }
+.warn-card > h3 { color: var(--warn); }
+
+/* 小計有算式時可能很長：讓它換行，不要撐出畫面 */
+.field .amt[data-sub] { flex: 0 1 auto; min-width: 0; white-space: normal; text-align: right; overflow-wrap: anywhere; }
+
+/* 首頁最上面的「待付／待收」：兩個數字 */
+.card.due { display: grid; grid-template-columns: 1fr 1fr; text-align: center; padding: 14px 8px; }
+.card.due .due-col { min-width: 0; padding: 0 6px; }
+.card.due .due-col + .due-col { border-left: 1px solid var(--line); }
+.card.due small { display: block; font-size: 12px; font-weight: 700; color: var(--muted); }
+.card.due b { display: block; font-size: 26px; line-height: 1.25; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

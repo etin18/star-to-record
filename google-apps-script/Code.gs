@@ -23,7 +23,7 @@
 var SECRET = '';   // ← 改成你自己的通關密語
 
 /** 後端版本。App 設定頁會跟自己的版本並排顯示，用來確認有沒有真的重新部署。 */
-var API_VERSION = 'v3';
+var API_VERSION = 'v4';
 
 /* ==========================================================================
    資料表定義：欄位順序＝試算表欄位順序
@@ -127,8 +127,11 @@ var SHEETS = {
       // 逗號隔開：多帶、重複、自留
       { key: 'flags', header: '標記', type: 'text' },
       { key: 'cancelled', header: '已取消', type: 'bool' },
-      // 貨付＋：這個品項的價格裡，取貨時才付的那一段（已含在單價內，不是額外費用）
-      { key: 'cod', header: '貨付＋', type: 'number' }
+      // 多付、二補：每一個多出來的錢（例如走貨付被加價、照品項補的二補）。
+      // 小計＝(單價＋多付＋二補)×數量，跟商品款同一天付。
+      // 這一欄以前是「貨付＋」（意思不同、已停用），舊分頁會自動改名並清空，見 ensureColumns
+      { key: 'extra', header: '多付', type: 'number', replaces: '貨付＋' },
+      { key: 'second', header: '二補', type: 'number' }
     ]
   },
   buyFees: {
@@ -140,7 +143,9 @@ var SHEETS = {
       { key: 'amount', header: '金額', type: 'number' },
       { key: 'paid', header: '已付', type: 'bool' },
       { key: 'paidDate', header: '付款日', type: 'date' },
-      { key: 'note', header: '備註', type: 'text', width: 200 }
+      { key: 'note', header: '備註', type: 'text', width: 200 },
+      // 一起寄：好幾張單一起寄到超商時，各單分到的運費帶同一個編號
+      { key: 'shipId', header: '一起寄編號', type: 'text', width: 250 }
     ]
   },
   sells: {
@@ -316,9 +321,21 @@ function getSheet(entity) {
 /**
  * 後來新增的欄位（例如「照片」）補到既有分頁的最後面。
  * 新欄位一律加在最後，所以舊資料的欄位順序不會亂。
+ * 欄位有 replaces：同一個位置以前是別的欄位（意思不一樣），看到舊表頭就改名並清空舊值，
+ * 免得舊的數字被當成新欄位的意思讀進來。
  */
 function ensureColumns(sheet, config) {
   var have = sheet.getLastColumn();
+  var replacing = config.fields.some(function (f, i) { return f.replaces && i < have; });
+  if (replacing) {
+    var headers = sheet.getRange(1, 1, 1, have).getValues()[0];
+    config.fields.forEach(function (f, i) {
+      if (!f.replaces || i >= have || String(headers[i]) !== f.replaces) return;
+      var rows = sheet.getLastRow();
+      if (rows >= 2) sheet.getRange(2, i + 1, rows - 1, 1).clearContent();
+      sheet.getRange(1, i + 1).setValue(f.header);
+    });
+  }
   if (have >= config.fields.length) return;
   for (var i = have; i < config.fields.length; i++) {
     var f = config.fields[i];

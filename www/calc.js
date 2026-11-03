@@ -6,7 +6,9 @@
    - 買單：付款日（貨付＝取貨那天）。還沒付款的不計入
    - 費用：自己的付款日，沒填就跟著買單。標了未付的不計入
    - 賣單：收款日。還沒收的不計入
-   - 已取消的買單整張不算
+   - 已取消的買單整張不算；品項全部取消的單也一樣（連運費等費用都不算）
+   - 一起寄的超商運費是取貨時付現金，不算進任何帳戶
+   - 外幣單以「實付台幣」為準；還沒填就用匯率先估（data.rates，1 台幣＝多少外幣）
    ========================================================================== */
 (function (root) {
   'use strict';
@@ -35,20 +37,40 @@
     return by;
   }
 
-  const itemTotal = (it) => (it.cancelled ? 0 : num(it.price) * num(it.qty));
+  /** 一個的價錢＝單價＋多付＋二補。多付：例如走貨付被加價的錢；二補：照品項補的錢。都是「每一個」多出來的 */
+  const itemUnit = (it) => num(it.price) + num(it.extra) + num(it.second);
+  const itemTotal = (it) => (it.cancelled ? 0 : itemUnit(it) * num(it.qty));
   const itemsSum = (items) => items.reduce((s, it) => s + itemTotal(it), 0);
 
-  /** 買單的商品款（台幣）。外幣單以「實付台幣」為準，還沒填就是 0 */
-  function buyGoods(buy, items) {
-    return isTwd(buy.currency) ? itemsSum(items) : num(buy.paidTwd);
+  /** 外幣單還沒填實付台幣：金額是用匯率估的 */
+  const isEstimated = (buy) => !isTwd(buy.currency) && !num(buy.paidTwd);
+  /** 用匯率把外幣品項合計換成台幣。rates：1 台幣＝多少外幣，例如 { KRW: 41.2 }；沒有匯率就是 0 */
+  function estimateTwd(buy, items, rates) {
+    const r = rates ? num(rates[buy.currency]) : 0;
+    return r > 0 ? Math.round(itemsSum(items) / r) : 0;
+  }
+  /** 買單的商品款（台幣）。外幣單以「實付台幣」為準，還沒填就用匯率估 */
+  function buyGoods(buy, items, rates) {
+    if (isTwd(buy.currency)) return itemsSum(items);
+    return num(buy.paidTwd) || estimateTwd(buy, items, rates);
   }
   const feesSum = (fees) => fees.reduce((s, f) => s + num(f.amount), 0);
 
   const isCancelled = (buy) => buy.arrival === '已取消';
+  /** 這張單不算錢：整張取消，或品項全部都取消了（費用也一起不算） */
+  const isVoid = (buy, items) => isCancelled(buy) || (!!items && items.length > 0 && items.every((i) => i.cancelled));
 
-  /** 這個品項「貨付＋」的金額（含在價格裡、取貨時才付）。整張單貨付或外幣單不適用 */
-  const codOf = (buy, it) => (isTwd(buy.currency) && buy.payMethod !== '貨付' && !it.cancelled ? Math.min(Math.max(num(it.cod), 0), itemTotal(it)) : 0);
-  const codDue = (buy, items) => items.reduce((n, i) => n + codOf(buy, i), 0);
+  /**
+   * 一起寄的運費平分給 n 張單。都取整數，除不盡的零頭放第一張。
+   * 例如 38 分 3 張 → [14, 12, 12]
+   */
+  function splitEven(total, n) {
+    if (!n) return [];
+    const base = Math.floor(num(total) / n);
+    const out = Array(n).fill(base);
+    out[0] = num(total) - base * (n - 1);
+    return out;
+  }
 
   /**
    * 現金流事件。每筆都是「某一天，某筆錢，進或出」。
@@ -60,7 +82,7 @@
     const out = [];
 
     (data.buys || []).forEach((buy) => {
-      if (isCancelled(buy)) return;
+      if (isVoid(buy, by.itemsOf[buy.id])) return;
       const items = (by.itemsOf[buy.id] || []).filter((i) => !i.cancelled);
       const sum = items.reduce((s, i) => s + itemTotal(i), 0);
       // 費用依品項小計比例攤
@@ -70,28 +92,14 @@
       }));
       const account = buy.payMethod === '匯款' || buy.payMethod === '刷卡' ? buy.accountId : '';
 
-      // 貨付＋：品項價格裡「取貨時才付」的那一段。商品款拆成兩筆——
-      // 先付的（匯款那天）和貨付的（到貨那天、現金）。整張單已經是貨付、或外幣單，不拆
-      const cods = items.map((i) => codOf(buy, i));
-      const codTotal = cods.reduce((a, b) => a + b, 0);
-      const ratiosOf = (weights) => {
-        const total = weights.reduce((a, b) => a + b, 0);
-        return weights.map((w) => (total > 0 ? w / total : 1 / (items.length || 1)));
-      };
-      const upRatios = ratiosOf(items.map((i, k) => itemTotal(i) - cods[k]));
-      const codRatios = ratiosOf(cods);
-      const mk = (ratios) => items.map((i, k) => ({ item: i, ratio: ratios[k] }));
-
+      // 多付、二補都含在品項金額裡，跟商品款同一天付
       if (buy.paidDate) {
-        out.push({ type: 'buy', date: buy.paidDate, amount: buyGoods(buy, by.itemsOf[buy.id] || []) - codTotal, dir: -1, accountId: account, buyId: buy.id, shares: mk(upRatios) });
-      }
-      if (codTotal > 0 && buy.arrival === '已到') {
-        out.push({ type: 'buy', date: buy.arrivedDate || UNKNOWN_DATE, amount: codTotal, dir: -1, accountId: '', buyId: buy.id, shares: mk(codRatios), cod: true });
+        out.push({ type: 'buy', date: buy.paidDate, amount: buyGoods(buy, by.itemsOf[buy.id] || [], data.rates), dir: -1, accountId: account, buyId: buy.id, shares, estimated: isEstimated(buy) });
       }
       (by.feesOf[buy.id] || []).forEach((fee) => {
         const date = fee.paid ? (fee.paidDate || buy.paidDate) : '';
         if (!date) return;
-        out.push({ type: 'fee', date, amount: num(fee.amount), dir: -1, accountId: account, buyId: buy.id, shares });
+        out.push({ type: 'fee', date, amount: num(fee.amount), dir: -1, accountId: fee.shipId ? '' : account, buyId: buy.id, shares });
       });
     });
 
@@ -105,6 +113,57 @@
     });
 
     return out;
+  }
+
+  /**
+   * 首頁最上面的「待付」：之後還要付出去的錢，好先把錢留起來。
+   *   unpaid 還沒付的單（不含貨付）     cod 貨付、還沒取貨（取貨時付）
+   *   called 喊單、還沒下單            fees 標了未付的費用（大多是整單二補）
+   * 前三種連同「跟商品款一起付」的費用（標已付、沒有自己的付款日）一起算。
+   * 未付費用金額空白的不知道多少，另外數幾筆（unknown）
+   */
+  function dueSummary(data) {
+    const by = index(data);
+    const res = { total: 0, unpaid: 0, cod: 0, called: 0, fees: 0, unknown: 0, estimated: false };
+    (data.buys || []).forEach((buy) => {
+      const items = by.itemsOf[buy.id] || [];
+      if (isVoid(buy, items)) return;
+      const fees = by.feesOf[buy.id] || [];
+      let bucket = '';
+      if (buy.callDate && !buy.date) bucket = 'called';
+      else if (buy.payMethod === '貨付') bucket = buy.arrival === '未到' ? 'cod' : '';
+      else if (!buy.paidDate) bucket = 'unpaid';
+      if (bucket) {
+        res[bucket] += buyGoods(buy, items, data.rates) + feesSum(fees.filter((f) => f.paid && !f.paidDate));
+        if (isEstimated(buy)) res.estimated = true;
+      }
+      fees.filter((f) => !f.paid).forEach((f) => { if (num(f.amount) > 0) res.fees += num(f.amount); else res.unknown++; });
+    });
+    res.total = res.unpaid + res.cod + res.called + res.fees;
+    return res;
+  }
+
+  /**
+   * 首頁的「待收」：賣單已經成立、錢還沒收到的。
+   *   transfer 買家還沒匯款   pickup 取貨付款、買家還沒取貨   cash 現金還沒收
+   */
+  function receivable(data) {
+    const res = { total: 0, transfer: 0, pickup: 0, cash: 0, count: 0 };
+    (data.sells || []).forEach((s) => {
+      if (s.paidDate) return;
+      const key = s.payMethod === '取貨付款' ? 'pickup' : s.payMethod === '現金' ? 'cash' : 'transfer';
+      res[key] += num(s.amount);
+      res.count++;
+    });
+    res.total = res.transfer + res.pickup + res.cash;
+    return res;
+  }
+
+  /** 每張買單實際付出去多少（商品款＋已付的費用，不分日期）。明細的小計用，跟報表同一套規則 */
+  function paidByBuy(data) {
+    const res = {};
+    events(data).forEach((e) => { if (e.buyId) res[e.buyId] = (res[e.buyId] || 0) + e.amount; });
+    return res;
   }
 
   /** period：'YYYY-MM' 只算那個月；null 算全部 */
@@ -156,7 +215,7 @@
   function allocations(data, period) {
     const rows = [];
     events(data).filter((e) => inPeriod(e, period)).forEach((e) => {
-      if (e.shares) {
+      if (e.shares && e.shares.length) {
         e.shares.forEach((s) => rows.push({
           type: e.type, dir: -1, date: e.date, amount: e.amount * s.ratio,
           groupId: s.item.groupId, releaseId: s.item.releaseId,
@@ -164,6 +223,7 @@
         }));
       } else {
         rows.push({
+          // 沒有品項可以攤的買單（很少見）放進「沒指定團」，各團加起來才會等於總花費
           type: e.type, dir: e.dir, date: e.date, amount: e.amount,
           groupId: e.groupId || '', releaseId: '', memberIds: e.memberId ? [e.memberId] : [], isSet: false, flags: []
         });
@@ -282,22 +342,21 @@
     const daysSince = (d) => { const t = new Date(d); return d && !isNaN(t) ? Math.max(0, Math.round((new Date(today) - t) / 86400000)) : null; };   // 日期不詳就沒有「等了幾天」
 
     (data.buys || []).forEach((buy) => {
-      if (isCancelled(buy)) return;
       const items = by.itemsOf[buy.id] || [];
+      if (isVoid(buy, items)) return;
       // 有喊單日、還沒下單：這張單還在等賣家，只放「還沒下單」，不算還沒付、還沒到貨
       if (buy.callDate && !buy.date) {
         t.notOrdered.push({ buy, days: daysSince(buy.callDate), total: itemsSum(items) });
         return;
       }
       const unpaid = !buy.paidDate && buy.payMethod !== '貨付';
-      const cod = codDue(buy, items);
 
       if (unpaid) t.unpaid.push({ buy, days: daysSince(buy.date), total: itemsSum(items) });
 
       if (buy.arrival === '未到' && !unpaid) {
         const future = buy.expectedMonth && buy.expectedMonth > thisMonth;
-        if (future) t.preorder.push({ buy, total: itemsSum(items), cod });
-        else t.notArrived.push({ buy, days: daysSince(buy.paidDate || buy.date), total: itemsSum(items), cod });
+        if (future) t.preorder.push({ buy, total: itemsSum(items) });
+        else t.notArrived.push({ buy, days: daysSince(/^\d{4}-/.test(buy.paidDate) ? buy.paidDate : buy.date), total: itemsSum(items) });
       }
 
       (by.feesOf[buy.id] || []).forEach((fee) => {
@@ -321,8 +380,8 @@
 
   const api = {
     UNKNOWN_DATE, CURRENCIES, SYMBOLS, isTwd, list, num, ym, index,
-    itemTotal, itemsSum, codOf, codDue, buyGoods, feesSum, isCancelled,
-    events, summary, monthly, accountFlows, allocations,
+    itemUnit, itemTotal, itemsSum, splitEven, buyGoods, estimateTwd, isEstimated, feesSum, isCancelled, isVoid,
+    events, paidByBuy, dueSummary, receivable, summary, monthly, accountFlows, allocations,
     byGroup, groupDetail, multiSpend, spareCounts, collection, todos
   };
 
