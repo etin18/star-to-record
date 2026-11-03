@@ -454,6 +454,50 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   check('遮住金額後出現 $•••', t.includes('$•••'));
   await shot('18-遮住金額');
 
+  /* ----- 舊版留下的重複選項（每台裝置各建一組），還有存成編號的寄送方式 ----- */
+  const ctx3 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await stubRates(ctx3);
+  const page3 = await ctx3.newPage();
+  page3.on('pageerror', (e) => errors.push('[整理頁] ' + String(e)));
+  const dupSeed = JSON.parse(JSON.stringify(SEED));
+  dupSeed.options = [
+    ...['賣貨便', '交貨便', '面交', '宅配'].map((n, i) => ({ id: 'old-a' + i, kind: 'ship', name: n, createdAt: '2026-10-08T11:11:01.098Z' })),
+    ...['賣貨便', '交貨便', '面交', '宅配'].map((n, i) => ({ id: 'old-b' + i, kind: 'ship', name: n, createdAt: '2026-10-08T11:24:17.317Z' })),
+    ...['演唱會', '周邊'].map((n, i) => ({ id: 'old-c' + i, kind: 'expcat', name: n, createdAt: '2026-10-08T11:11:01.098Z' })),
+    ...['演唱會', '周邊'].map((n, i) => ({ id: 'old-d' + i, kind: 'expcat', name: n, createdAt: '2026-10-13T11:22:36.772Z' })),
+    { id: 'c1', kind: 'channel', name: '店家A', createdAt: '2026-10-08T11:00:00.000Z' },
+    { id: 'c1dup', kind: 'channel', name: '店家A', createdAt: '2026-10-09T11:00:00.000Z' },
+    { id: 'c2', kind: 'channel', name: '平台B', createdAt: '2026-10-08T11:00:00.000Z' }
+  ];
+  dupSeed.buyItems[0].channelId = 'c1dup';                 // 品項的通路指到後建的那個
+  dupSeed.sells[0].shipMethod = 'old-b0';                  // 賣單存的是編號
+  await page3.addInitScript((sd) => { if (!localStorage.getItem('sl.data')) localStorage.setItem('sl.data', JSON.stringify(sd)); }, dupSeed);
+  await page3.goto(BASE);
+  await page3.waitForSelector('#view .card');
+  const tidy = await page3.evaluate(() => {
+    const d = window.__sl.state.data;
+    return { ship: d.options.filter((o) => o.kind === 'ship').map((o) => o.id).join(','), expcat: d.options.filter((o) => o.kind === 'expcat').length,
+      channel: d.options.filter((o) => o.kind === 'channel').map((o) => o.id).join(','), item: d.buyItems.find((i) => i.id === 'i1').channelId, sell: d.sells.find((x) => x.id === 's1').shipMethod,
+      removes: window.__sl.state.outbox.filter((x) => x.action === 'remove' && x.entity === 'options').length };
+  });
+  check('重複的寄送方式只留最早建的那組（4 個）', tidy.ship === 'old-a0,old-a1,old-a2,old-a3');
+  check('重複的花費類別、通路也合併', tidy.expcat === 2 && tidy.channel === 'c1,c2');
+  check('品項的通路從被刪的那個改指到留下的', tidy.item === 'c1');
+  check('賣單的寄送方式從編號換回名字', tidy.sell === '賣貨便');
+  check('被刪的選項排進待送出，會從試算表刪掉（4＋2＋1＝7 筆）', tidy.removes === 7);
+  check('首頁顯示「賣貨便」，不是編號', (await page3.evaluate(() => document.body.innerText)).includes('· 賣貨便') && !(await page3.evaluate(() => document.body.innerText)).includes('old-b0'));
+  await page3.reload();
+  await page3.waitForSelector('#view .card');
+  check('重新打開不會再刪或再加', await page3.evaluate(() => window.__sl.state.data.options.length === 8 && window.__sl.state.outbox.filter((x) => x.action === 'remove').length === 7));
+  // 記一張新賣單、選寄送方式：存名字
+  await page3.click('[data-tab="add"]');
+  await page3.click('[data-addkind="sell"]');
+  await page3.fill('[data-path="amount"]', '150');
+  await page3.selectOption('[data-path="shipMethod"]', { label: '面交' });
+  await page3.click('button.btn[data-save]');
+  check('新賣單的寄送方式存的是名字「面交」', await page3.evaluate(() => window.__sl.state.data.sells.some((s) => s.amount === 150 && s.shipMethod === '面交')));
+  await ctx3.close();
+
   console.log('\nconsole 錯誤：', errors.length ? '\n' + errors.join('\n') : '無');
   const failed = checks.filter((c) => !c[1]);
   console.log(`${checks.length - failed.length}/${checks.length} 項通過`);

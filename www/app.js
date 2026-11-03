@@ -8,7 +8,7 @@
 'use strict';
 
 const C = window.Calc;
-const FRONT_VERSION = 'v7';
+const FRONT_VERSION = 'v8';
 const BACKEND_NEEDED = 4;   // 前端需要的最低後端版本（v2 照片、v3 喊單日、v4 品項的多付／二補與費用的「一起寄」）
 const ENTITIES = ['groups', 'members', 'releases', 'accounts', 'parties', 'options', 'buys', 'buyItems', 'buyFees', 'sells', 'expenses'];
 const FLAGS = ['多帶', '重複', '自留'];
@@ -106,6 +106,34 @@ function normalizeData() {
   state.data.buyItems.forEach((i) => { delete i.cod; });
 }
 normalizeData();
+
+/**
+ * 整理要寫回試算表的舊資料（讀到試算表之後、匯入備份之後、沒連試算表時開 App 都會跑）：
+ * 1. 賣單的寄送方式以前存成選項編號，畫面會顯示一串怪字，換成名字
+ * 2. 同種類、同名字的選項只留最早建的那個。舊版每台裝置第一次打開都會自己建一組預設選項，
+ *    所以四台裝置就多了四組。品項的通路指到被刪的那個，改指留下的那個，其他的從試算表刪掉
+ * 每台裝置看到的資料一樣，算出來要留哪個也一樣；同一列被刪兩次也不會出錯
+ */
+function tidyData() {
+  const byId = {};
+  state.data.options.forEach((o) => { byId[o.id] = o; });
+  state.data.sells.filter((s) => byId[s.shipMethod] && byId[s.shipMethod].kind === 'ship')
+    .forEach((s) => put('sells', Object.assign({}, s, { shipMethod: byId[s.shipMethod].name })));
+
+  const keep = {};    // 種類|名字 → 留下的選項
+  const moved = {};   // 要刪的編號 → 留下的編號
+  state.data.options.slice()
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || String(a.id).localeCompare(String(b.id)))
+    .forEach((o) => { const k = o.kind + '|' + String(o.name).trim(); if (keep[k]) moved[o.id] = keep[k].id; else keep[k] = o; });
+  if (!Object.keys(moved).length) return;
+  new Set(state.data.buyItems.filter((i) => moved[i.channelId]).map((i) => i.buyId)).forEach((id) => {
+    const b = state.data.buys.find((x) => x.id === id);
+    if (!b) return;
+    const { items, fees } = buyParts(id);
+    putBuy(Object.assign({}, b), items.map((i) => Object.assign({}, i, moved[i.channelId] ? { channelId: moved[i.channelId] } : {})), fees.map((f) => Object.assign({}, f)));
+  });
+  Object.keys(moved).forEach((id) => del('options', id));
+}
 
 let IDX = null;
 const idx = () => IDX || (IDX = C.index(state.data));
@@ -226,6 +254,7 @@ async function pull() {
     normalizeData();
     saveLocal();
     setSync('ok');
+    tidyData();
     ensureDefaults();
     render();
   } catch (e) {
@@ -694,6 +723,7 @@ async function importBackup(file) {
         });
       });
       saveLocal(); flush();
+      tidyData();   // 別台裝置的備份可能帶著另一組同名的預設選項
     }
 
     if (!photosAdded && !recordsAdded) throw new Error('檔案裡沒有可以匯入的東西（或這支手機都已經有了）');
@@ -1152,6 +1182,8 @@ document.addEventListener('keydown', (ev) => {
 const partyOptions = () => state.data.parties.map((p) => [p.id, p.name + (p.platform ? `（${p.platform}）` : '')]);
 const accountOptions = () => state.data.accounts.map((a) => [a.id, a.name]);
 const optionList = (kind) => opts(kind).map((o) => [o.id, o.name]);
+/** 存名字的選項（寄送方式）：目前的值不在清單裡也列出來，編輯時才不會被清掉 */
+const nameList = (kind, cur) => { const l = opts(kind).map((o) => [o.name, o.name]); return cur && !l.some(([v]) => v === cur) ? l.concat([[cur, cur]]) : l; };
 
 /* ---------- 買單表單 ---------- */
 function newBuy() {
@@ -1311,7 +1343,7 @@ function sellFormHtml() {
         ${fInput('金額', 'amount', 'number')}
         ${payCombo('收款', 'sell', m, PAY_SELL)}
         ${m.payMethod === '取貨付款' ? '' : `<div class="field"><label>已收款</label><input type="checkbox" data-paidchk ${m.paidDate ? 'checked' : ''}></div>`}
-        ${fSelect('寄送方式', 'shipMethod', optionList('ship'), '（不指定）', 'ship')}
+        ${fSelect('寄送方式', 'shipMethod', nameList('ship', m.shipMethod), '（不指定）', 'ship')}
         ${fSelect('寄送狀態', 'shipStatus', SHIP_STATUS.map((x) => [x, x]))}
       </div>
       ${photoCard()}
@@ -1366,7 +1398,7 @@ function addEntity(kind, ctx) {
   if (kind === 'group') { const n = askName('團的名字'); return n ? put('groups', { id: '', name: n }).id : null; }
   if (kind === 'release') { const n = askName('回歸（專輯或活動）的名字'); return n && ctx ? put('releases', { id: '', groupId: ctx, name: n }).id : null; }
   if (kind === 'channel') { const n = askName('通路的名字'); return n ? put('options', { id: '', kind: 'channel', name: n }).id : null; }
-  if (kind === 'ship') { const n = askName('寄送方式'); return n ? put('options', { id: '', kind: 'ship', name: n }).id : null; }
+  if (kind === 'ship') { const n = askName('寄送方式'); if (!n) return null; put('options', { id: '', kind: 'ship', name: n }); return n; }
   if (kind === 'expcat') { const n = askName('花費類別'); if (!n) return null; put('options', { id: '', kind: 'expcat', name: n }); return n; }
   if (kind === 'account') { const n = askName('帳戶的名字（例如銀行名）'); return n ? put('accounts', { id: '', name: n }).id : null; }
   if (kind === 'party') {
@@ -2112,7 +2144,7 @@ async function boot() {
   if (state.theme === 'custom' && !bgData) state.theme = 'glow';
   applyTheme();
   // 有連試算表時要等第一次讀回來再補預設選項，不然新手機會在讀到之前先自己建一份
-  if (!state.apiUrl) ensureDefaults();
+  if (!state.apiUrl) { tidyData(); ensureDefaults(); }
   render();
   if (state.apiUrl) pull();
   fetchRates();
