@@ -40,10 +40,12 @@ const SEED = {
   options: [{ id: 'c1', kind: 'channel', name: LONG + '通路' }, { id: 's0', kind: 'ship', name: '賣貨便' }, { id: 'x0', kind: 'expcat', name: '演唱會' }],
   buys: [
     { id: 'b1', date: iso(-3), partyId: 'p1', partyName: LONG + '賣家', payMethod: '匯款', accountId: 'a1', paidDate: iso(-2), currency: 'TWD', arrival: '未到', note: LONG.repeat(3), photoIds: 'ph1,ph2,ph3,ph4,ph5,ph6,ph7' },
+    { id: 'b3', date: '', callDate: iso(-5), partyId: 'p1', partyName: LONG + '賣家', payMethod: '匯款', accountId: 'a1', paidDate: '', currency: 'TWD', arrival: '未到' },
     { id: 'b2', date: iso(-8), partyId: 'p1', partyName: LONG + '賣家', payMethod: '刷卡', accountId: 'a1', paidDate: iso(-8), currency: 'KRW', paidTwd: 0, pending: true, arrival: '未到' }
   ],
   buyItems: [
-    { id: 'i1', buyId: 'b1', groupId: 'gA', releaseId: 'r1', memberIds: members.map((m) => m.id).join(','), channelId: 'c1', name: LONG, price: 12345678, qty: 9, flags: '多帶,重複,自留' },
+    { id: 'i1', buyId: 'b1', groupId: 'gA', releaseId: 'r1', memberIds: members.map((m) => m.id).join(','), channelId: 'c1', name: LONG, price: 12345678, qty: 9, flags: '多帶,重複,自留', cod: 5000 },
+    { id: 'i3', buyId: 'b3', groupId: 'gA', releaseId: 'r1', memberIds: 'm0', channelId: 'c1', name: LONG, price: 530, qty: 1, flags: '', cod: 30 },
     { id: 'i2', buyId: 'b2', groupId: 'gA', releaseId: 'r1', memberIds: '', isSet: true, channelId: 'c1', name: '一套', price: 93100, qty: 1, flags: '' }
   ],
   buyFees: [{ id: 'f1', buyId: 'b1', kind: '後補款', amount: 0, paid: false, note: LONG }],

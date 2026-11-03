@@ -136,6 +136,13 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   await page.click('[data-add-item]');
   check('新增一行會帶入上一行的回歸', (await page.inputValue('[data-relcombo="1"]')) === 'r:r1');
   await page.click('[data-del-item="1"]');
+  // 喊單日：還沒下單，只有喊單日
+  await page.click('[data-no-order]');
+  check('按「還沒下單」，下單日清空', (await page.inputValue('[data-path="buy.date"]')) === '');
+  await page.fill('[data-path="buy.callDate"]', '2026-10-01');
+  // 貨付＋：這個品項 300 元裡，30 取貨時才付
+  await page.fill('[data-path="items.0.cod"]', '30');
+  check('小計註明取貨付 30', (await page.textContent('[data-sub="0"]')).includes('取貨付') && (await page.textContent('[data-sub="0"]')).includes('30'));
   await page.click('[data-add-fee]');
   await page.fill('[data-path="fees.0.amount"]', '38');
   await shot('04-買單填好');
@@ -143,6 +150,18 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   await page.waitForSelector('.toast');
   const saved = await page.evaluate(() => window.__sl.state.data.buys.length);
   check('買單存起來了', saved === 5);
+  check('這張單有喊單日、沒有下單日', await page.evaluate(() => window.__sl.state.data.buys.some((b) => b.callDate === '2026-10-01' && b.date === '')));
+  check('品項存了貨付＋ 30', await page.evaluate(() => window.__sl.state.data.buyItems.some((i) => i.cod === 30)));
+
+  // 首頁「還沒下單」
+  await page.click('[data-tab="home"]');
+  check('首頁有「還沒下單」，而且在最近的上面', await page.evaluate(() => { const t = document.body.innerText; return /^還沒下單\s/m.test(t) && t.indexOf('還沒下單') < t.indexOf('最近'); }));
+  await page.locator('.item[data-act="buy"]', { hasText: '簽售卡 2.0' }).first().click();
+  await page.waitForSelector('[data-quick="ordered"]');
+  check('詳細頁顯示貨付＋ 與「標示已下單」', (await text()).includes('貨付＋') && (await text()).includes('標示已下單'));
+  await page.click('[data-quick="ordered"]');
+  await page.click('.sheet [data-close]');
+  check('標示已下單後，離開「還沒下單」', !/^還沒下單\s/m.test(await text()));
 
   /* ----- 報表 ----- */
   await page.click('[data-tab="report"]');

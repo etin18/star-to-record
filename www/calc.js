@@ -46,6 +46,10 @@
 
   const isCancelled = (buy) => buy.arrival === '已取消';
 
+  /** 這個品項「貨付＋」的金額（含在價格裡、取貨時才付）。整張單貨付或外幣單不適用 */
+  const codOf = (buy, it) => (isTwd(buy.currency) && buy.payMethod !== '貨付' && !it.cancelled ? Math.min(Math.max(num(it.cod), 0), itemTotal(it)) : 0);
+  const codDue = (buy, items) => items.reduce((n, i) => n + codOf(buy, i), 0);
+
   /**
    * 現金流事件。每筆都是「某一天，某筆錢，進或出」。
    * 報表、帳戶進出都從這裡來，口徑才會一致。
@@ -59,14 +63,30 @@
       if (isCancelled(buy)) return;
       const items = (by.itemsOf[buy.id] || []).filter((i) => !i.cancelled);
       const sum = items.reduce((s, i) => s + itemTotal(i), 0);
+      // 費用依品項小計比例攤
       const shares = items.map((i) => ({
         item: i,
         ratio: sum > 0 ? itemTotal(i) / sum : 1 / (items.length || 1)
       }));
       const account = buy.payMethod === '匯款' || buy.payMethod === '刷卡' ? buy.accountId : '';
 
+      // 貨付＋：品項價格裡「取貨時才付」的那一段。商品款拆成兩筆——
+      // 先付的（匯款那天）和貨付的（到貨那天、現金）。整張單已經是貨付、或外幣單，不拆
+      const cods = items.map((i) => codOf(buy, i));
+      const codTotal = cods.reduce((a, b) => a + b, 0);
+      const ratiosOf = (weights) => {
+        const total = weights.reduce((a, b) => a + b, 0);
+        return weights.map((w) => (total > 0 ? w / total : 1 / (items.length || 1)));
+      };
+      const upRatios = ratiosOf(items.map((i, k) => itemTotal(i) - cods[k]));
+      const codRatios = ratiosOf(cods);
+      const mk = (ratios) => items.map((i, k) => ({ item: i, ratio: ratios[k] }));
+
       if (buy.paidDate) {
-        out.push({ type: 'buy', date: buy.paidDate, amount: buyGoods(buy, by.itemsOf[buy.id] || []), dir: -1, accountId: account, buyId: buy.id, shares });
+        out.push({ type: 'buy', date: buy.paidDate, amount: buyGoods(buy, by.itemsOf[buy.id] || []) - codTotal, dir: -1, accountId: account, buyId: buy.id, shares: mk(upRatios) });
+      }
+      if (codTotal > 0 && buy.arrival === '已到') {
+        out.push({ type: 'buy', date: buy.arrivedDate || UNKNOWN_DATE, amount: codTotal, dir: -1, accountId: '', buyId: buy.id, shares: mk(codRatios), cod: true });
       }
       (by.feesOf[buy.id] || []).forEach((fee) => {
         const date = fee.paid ? (fee.paidDate || buy.paidDate) : '';
@@ -258,20 +278,26 @@
   function todos(data, today) {
     const by = index(data);
     const thisMonth = monthOf(today);
-    const t = { unpaid: [], preorder: [], notArrived: [], feesUnpaid: [], sellUnpaid: [], notShipped: [], pending: [] };
+    const t = { unpaid: [], preorder: [], notArrived: [], feesUnpaid: [], sellUnpaid: [], notShipped: [], pending: [], notOrdered: [] };
     const daysSince = (d) => { const t = new Date(d); return d && !isNaN(t) ? Math.max(0, Math.round((new Date(today) - t) / 86400000)) : null; };   // 日期不詳就沒有「等了幾天」
 
     (data.buys || []).forEach((buy) => {
       if (isCancelled(buy)) return;
       const items = by.itemsOf[buy.id] || [];
+      // 有喊單日、還沒下單：這張單還在等賣家，只放「還沒下單」，不算還沒付、還沒到貨
+      if (buy.callDate && !buy.date) {
+        t.notOrdered.push({ buy, days: daysSince(buy.callDate), total: itemsSum(items) });
+        return;
+      }
       const unpaid = !buy.paidDate && buy.payMethod !== '貨付';
+      const cod = codDue(buy, items);
 
       if (unpaid) t.unpaid.push({ buy, days: daysSince(buy.date), total: itemsSum(items) });
 
       if (buy.arrival === '未到' && !unpaid) {
         const future = buy.expectedMonth && buy.expectedMonth > thisMonth;
-        if (future) t.preorder.push({ buy, total: itemsSum(items) });
-        else t.notArrived.push({ buy, days: daysSince(buy.paidDate || buy.date), total: itemsSum(items) });
+        if (future) t.preorder.push({ buy, total: itemsSum(items), cod });
+        else t.notArrived.push({ buy, days: daysSince(buy.paidDate || buy.date), total: itemsSum(items), cod });
       }
 
       (by.feesOf[buy.id] || []).forEach((fee) => {
@@ -295,7 +321,7 @@
 
   const api = {
     UNKNOWN_DATE, CURRENCIES, SYMBOLS, isTwd, list, num, ym, index,
-    itemTotal, itemsSum, buyGoods, feesSum, isCancelled,
+    itemTotal, itemsSum, codOf, codDue, buyGoods, feesSum, isCancelled,
     events, summary, monthly, accountFlows, allocations,
     byGroup, groupDetail, multiSpend, spareCounts, collection, todos
   };

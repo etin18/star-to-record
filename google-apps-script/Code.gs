@@ -23,7 +23,7 @@
 var SECRET = '';   // ← 改成你自己的通關密語
 
 /** 後端版本。App 設定頁會跟自己的版本並排顯示，用來確認有沒有真的重新部署。 */
-var API_VERSION = 'v2';
+var API_VERSION = 'v3';
 
 /* ==========================================================================
    資料表定義：欄位順序＝試算表欄位順序
@@ -105,7 +105,9 @@ var SHEETS = {
       { key: 'note', header: '備註', type: 'text', width: 200 },
       { key: 'createdAt', header: '建立時間', type: 'text' },
       // 照片編號，逗號隔開。照片本體只存在手機裡，這裡只讓別支手機知道「這張單有照片」
-      { key: 'photoIds', header: '照片', type: 'text', width: 200 }
+      { key: 'photoIds', header: '照片', type: 'text', width: 200 },
+      // 喊單日：賣家先幫忙預留數量、還沒輪到下單的那天。選填，所以下單日可以先空著
+      { key: 'callDate', header: '喊單日', type: 'date' }
     ]
   },
   buyItems: {
@@ -124,7 +126,9 @@ var SHEETS = {
       { key: 'qty', header: '數量', type: 'number' },
       // 逗號隔開：多帶、重複、自留
       { key: 'flags', header: '標記', type: 'text' },
-      { key: 'cancelled', header: '已取消', type: 'bool' }
+      { key: 'cancelled', header: '已取消', type: 'bool' },
+      // 貨付＋：這個品項的價格裡，取貨時才付的那一段（已含在單價內，不是額外費用）
+      { key: 'cod', header: '貨付＋', type: 'number' }
     ]
   },
   buyFees: {

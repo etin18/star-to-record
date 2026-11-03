@@ -147,4 +147,52 @@ ok('付款日不詳：算進「全部」，不算進任何一個月，也不會�
   assert.equal(t.unpaid[0].days, null);          // 沒有下單日
 });
 
+const codData = (arrival, extra) => Object.assign({
+  buys: [{ id: 'c1', payMethod: '匯款', accountId: 'a1', paidDate: '2026-09-30', currency: 'TWD', arrival, arrivedDate: arrival === '已到' ? '2026-10-09' : '' }],
+  buyItems: [{ id: 'ci1', buyId: 'c1', groupId: 'g', releaseId: 'r', memberIds: 'm1', price: 1000, qty: 1 },
+             { id: 'ci2', buyId: 'c1', groupId: 'g', releaseId: 'r', memberIds: 'm2', price: 530, qty: 1, cod: 30 }]
+}, extra || {});
+
+ok('貨付＋：500 在匯款那天，30 在到貨那天；總成本仍是 530', () => {
+  const d = codData('已到');
+  assert.equal(C.summary(d, '2026-09').spend, 1500);
+  assert.equal(C.summary(d, '2026-10').spend, 30);
+  assert.equal(C.summary(d, null).spend, 1530);
+  // 帳戶只出匯款的那 1500；貨付是現金，不動帳戶
+  assert.equal(C.accountFlows(d, null).a1.out, 1500);
+});
+
+ok('貨付＋：還沒到貨就只算先匯的，並提醒取貨要付多少', () => {
+  const d = codData('未到');
+  assert.equal(C.summary(d, null).spend, 1500);
+  const t = C.todos(d, '2026-10-10');
+  assert.equal(t.notArrived[0].cod, 30);
+});
+
+ok('貨付＋：依成員攤算時，30 算在有貨付的那個品項', () => {
+  const d = codData('已到');
+  const byMember = C.groupDetail(d, 'g', null).byMember;
+  assert.equal(Math.round(byMember.m1), 1000);
+  assert.equal(Math.round(byMember.m2), 530);
+});
+
+ok('貨付＋：整張單選貨付、或貨付比品項還大時不重複算', () => {
+  const whole = codData('已到');
+  whole.buys[0].payMethod = '貨付';
+  assert.equal(C.summary(whole, null).spend, 1530);              // 整張貨付：照舊，不拆
+  const big = codData('已到');
+  big.buyItems[1].cod = 9999;                                     // 超過品項金額：最多只算品項金額
+  assert.equal(C.summary(big, null).spend, 1530);
+});
+
+ok('還沒下單：有喊單日、沒下單日，只出現在「還沒下單」', () => {
+  const d = { buys: [{ id: 'n1', callDate: '2026-10-01', date: '', payMethod: '匯款', currency: 'TWD', arrival: '未到' },
+                     { id: 'n2', callDate: '', date: '', payMethod: '匯款', currency: 'TWD', arrival: '未到' }],
+              buyItems: [{ id: 'a', buyId: 'n1', groupId: 'g', price: 100, qty: 1 }, { id: 'b', buyId: 'n2', groupId: 'g', price: 100, qty: 1 }] };
+  const t = C.todos(d, '2026-10-11');
+  assert.deepEqual(t.notOrdered.map((x) => x.buy.id), ['n1']);
+  assert.equal(t.notOrdered[0].days, 10);
+  assert.deepEqual(t.unpaid.map((x) => x.buy.id), ['n2']);        // n1 還沒下單，不算還沒付
+});
+
 console.log(`\n${n} 組全過`);

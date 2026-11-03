@@ -8,8 +8,8 @@
 'use strict';
 
 const C = window.Calc;
-const FRONT_VERSION = 'v3';
-const BACKEND_NEEDED = 2;   // 前端需要的最低後端版本（v2 起試算表多一欄「照片」）
+const FRONT_VERSION = 'v5';
+const BACKEND_NEEDED = 3;   // 前端需要的最低後端版本（v2 起多一欄「照片」，v3 起買單多一欄「喊單日」）
 const ENTITIES = ['groups', 'members', 'releases', 'accounts', 'parties', 'options', 'buys', 'buyItems', 'buyFees', 'sells', 'expenses'];
 const FLAGS = ['多帶', '重複', '自留'];
 const PAY_BUY = ['匯款', '貨付', '刷卡', '現金'];
@@ -777,15 +777,16 @@ function viewHome() {
   const t = C.todos(state.data, todayStr());
   const cards = [
     todoCard('還沒付', t.unpaid.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(x.buy.date && mmdd(x.buy.date) + ' 下單', x.buy.payMethod, x.days != null && `已 ${x.days} 天`), money(x.total)))),
-    todoCard('還沒到貨', t.notArrived.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(x.buy.paidDate ? '已付款 ' + mmdd(x.buy.paidDate) : x.buy.payMethod, x.days != null && `等了 ${x.days} 天`), money(x.total)))),
+    todoCard('還沒到貨', t.notArrived.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(x.buy.paidDate ? '已付款 ' + mmdd(x.buy.paidDate) : x.buy.payMethod, x.days != null && `等了 ${x.days} 天`, x.cod > 0 && `取貨要付 ${money(x.cod)}`), money(x.total)))),
     todoCard('後補款還沒付', t.feesUnpaid.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), x.fee.kind + (x.fee.note ? ' · ' + x.fee.note : ''), x.fee.amount ? money(x.fee.amount) : '？'))),
     todoCard('買家還沒匯款', t.sellUnpaid.map((x) => todoRow('sell', x.sell.id, `${x.sell.partyName || '（未填買家）'} · ${x.sell.content || ''}`, [mmdd(x.sell.date), x.sell.shipMethod].filter(Boolean).join(' · '), money(x.sell.amount), 'in'))),
     todoCard('還沒寄', t.notShipped.map((x) => todoRow('sell', x.sell.id, `${x.sell.partyName || '（未填買家）'} · ${x.sell.content || ''}`, [mmdd(x.sell.date), x.sell.shipMethod || '未選寄送方式'].join(' · '), money(x.sell.amount), 'in'))),
     todoCard('待確認', t.pending.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), `實付台幣還沒填 · ${C.CURRENCIES[x.buy.currency] || ''}單`, '？'))),
-    todoCard('預購中', t.preorder.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), `預計 ${x.buy.expectedMonth} 到貨`, money(x.total))))
+    todoCard('預購中', t.preorder.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(`預計 ${x.buy.expectedMonth} 到貨`, x.cod > 0 && `取貨要付 ${money(x.cod)}`), money(x.total)))),
+    todoCard('還沒下單', t.notOrdered.map((x) => todoRow('buy', x.buy.id, buyLabel(x.buy), joinDot(`喊單 ${mmdd(x.buy.callDate)}`, x.days != null && `已 ${x.days} 天`), money(x.total))))
   ].filter(Boolean);
 
-  const recent = [...state.data.buys.map((b) => ({ d: b.date, html: histRow('buy', b) })),
+  const recent = [...state.data.buys.map((b) => ({ d: b.date || b.callDate, html: histRow('buy', b) })),
     ...state.data.sells.map((s) => ({ d: s.date, html: histRow('sell', s) })),
     ...state.data.expenses.map((e) => ({ d: e.date, html: histRow('expense', e) }))]
     .sort((a, b) => String(b.d).localeCompare(String(a.d))).slice(0, 5);
@@ -809,7 +810,7 @@ function histRow(kind, r) {
     const { items } = buyParts(r.id);
     const flagged = items.some((i) => C.list(i.flags).includes('多帶'));
     const dim = C.isCancelled(r);
-    const sub = joinDot(r.partyName || '（未填賣家）', mmdd(r.date), r.arrival === '已到' ? '已到貨' : r.arrival === '已取消' ? '已取消' : '', r.paidDate ? '' : '未付');
+    const sub = joinDot(r.partyName || '（未填賣家）', r.date ? mmdd(r.date) : r.callDate ? `喊單 ${mmdd(r.callDate)}` : '', r.arrival === '已到' ? '已到貨' : r.arrival === '已取消' ? '已取消' : '', r.paidDate ? '' : '未付');
     return `<div class="item" data-act="buy" data-id="${r.id}" style="${dim ? 'opacity:.5' : ''}">${head}<div class="main">${label}<div class="t wrap">${esc(buyLabel(r))}</div><div class="s">${flagged ? '<span class="tag warn">多帶</span>' : ''}${photoTag(r)}${esc(sub)}</div></div><div class="amt out">${money(-buyTotal(r))}</div></div>`;
   }
   if (kind === 'sell') {
@@ -892,7 +893,7 @@ function applyFilter() {
 
   if (f.kinds.includes('buy')) {
     state.data.buys.forEach((b) => {
-      if (!inMonth(b.date)) return;
+      if (!inMonth(b.date || b.callDate)) return;
       const { items, fees } = buyParts(b.id);
       if (f.accountId && b.accountId !== f.accountId) return;
       if (f.partyId && b.partyId !== f.partyId) return;
@@ -901,7 +902,7 @@ function applyFilter() {
         const hay = [b.partyName, b.note, ...items.map((i) => i.name + nameOf('releases', i.releaseId) + optionName(i.channelId)), ...fees.map((x) => x.note)].join(' ').toLowerCase();
         if (!hay.includes(q)) return;
       }
-      rows.push({ kind: 'buy', d: b.date, r: b, amount: -buyTotal(b) });
+      rows.push({ kind: 'buy', d: b.date || b.callDate, r: b, amount: -buyTotal(b) });
     });
   }
   if (f.kinds.includes('sell')) {
@@ -1091,13 +1092,13 @@ const optionList = (kind) => opts(kind).map((o) => [o.id, o.name]);
 function newBuy() {
   const last = state.data.buys.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
   return {
-    buy: { id: '', date: todayStr(), partyId: '', partyName: '', payMethod: '匯款', accountId: '', paidDate: '', currency: 'TWD', paidTwd: '', pending: false, arrival: '未到', arrivedDate: '', expectedMonth: '', note: '', photoIds: '' },
+    buy: { id: '', date: todayStr(), callDate: '', partyId: '', partyName: '', payMethod: '匯款', accountId: '', paidDate: '', currency: 'TWD', paidTwd: '', pending: false, arrival: '未到', arrivedDate: '', expectedMonth: '', note: '', photoIds: '' },
     items: [emptyItem(last ? buyParts(last.id).items[0] : null)],
     fees: []
   };
 }
 function emptyItem(prev) {
-  return { id: '', groupId: prev ? prev.groupId : (state.data.groups[0] ? state.data.groups[0].id : ''), releaseId: prev ? prev.releaseId : '', memberIds: '', isSet: false, channelId: prev ? prev.channelId : '', name: '', price: '', qty: 1, flags: '', cancelled: false };
+  return { id: '', groupId: prev ? prev.groupId : (state.data.groups[0] ? state.data.groups[0].id : ''), releaseId: prev ? prev.releaseId : '', memberIds: '', isSet: false, channelId: prev ? prev.channelId : '', name: '', price: '', qty: 1, cod: '', flags: '', cancelled: false };
 }
 
 function saveLabel() {
@@ -1109,11 +1110,17 @@ function saveLabel() {
   return `存起來 · 合計 ${tail}`;
 }
 /** 打字時只更新小計與合計，不重畫整頁 —— 重畫會把正在點的按鈕換掉，點擊就落空 */
+/** 品項小計的文字：有貨付＋就註明其中取貨時付多少 */
+function subText(it) {
+  const cur = form.model.buy.currency;
+  const cod = C.codOf(form.model.buy, it);
+  return foreign(C.itemTotal(it), cur) + (cod ? `（取貨付 ${money(cod)}）` : '');
+}
 function updateTotals() {
   if (!form || form.kind !== 'buy') return;
   form.model.items.forEach((it, i) => {
     const el = document.querySelector(`[data-sub="${i}"]`);
-    if (el) el.textContent = foreign(C.itemTotal(it), form.model.buy.currency);
+    if (el) el.textContent = subText(it);
   });
   const btn = document.querySelector('button.btn[data-save]');
   if (btn) btn.textContent = saveLabel();
@@ -1159,7 +1166,8 @@ function buyFormHtml() {
     ${form.inline ? '' : sheetTop(form.editing ? '編輯買單' : '記買單', '取消', '存起來')}
     <div class="${form.inline ? '' : 'sheet-body'}">
       <div class="card">
-        ${fInput('下單日', 'buy.date', 'date')}
+        <div class="field"><label>下單日</label><span class="pq"><input type="date" data-path="buy.date" value="${esc(m.buy.date)}" style="width:auto;flex:1;text-align:right"><button class="chip ${m.buy.date ? '' : 'on'}" data-no-order>還沒下單</button></span></div>
+        ${fInput('喊單日（選填）', 'buy.callDate', 'date')}
         ${partyCombo('賣家', 'buy.partyId')}
         ${payCombo('付款', 'buy', m.buy, PAY_BUY)}
         ${m.buy.payMethod === '貨付' ? '' : `<div class="field"><label>已付款</label><input type="checkbox" data-paidchk ${m.buy.paidDate ? 'checked' : ''}></div>`}
@@ -1208,9 +1216,10 @@ function itemHtml(it, i) {
     ${fSelect('通路', `items.${i}.channelId`, optionList('channel'), '（不指定）', 'channel')}
     ${fInput('品項', `items.${i}.name`, 'text', '例如 簽售卡 1.0、空專', `list="item-names"`)}
     <div class="field"><label>單價 × 數量</label><span class="pq"><input data-path="items.${i}.price" type="number" inputmode="decimal" step="any" value="${esc(it.price)}" placeholder="0"><i>×</i><input data-path="items.${i}.qty" type="number" inputmode="decimal" step="any" value="${esc(it.qty)}"></span></div>
+    ${form.model.buy.payMethod !== '貨付' && C.isTwd(form.model.buy.currency) ? fInput('貨付＋', `items.${i}.cod`, 'number', '取貨時才付的金額（含在單價內）') : ''}
     <div class="chips" style="margin-top:4px">${FLAGS.map((f) => `<button class="chip warn ${flags.includes(f) ? 'on' : ''}" data-flag="${i}:${f}">${f}</button>`).join('')}</div>
     ${form.editing ? fCheck('這行已取消', `items.${i}.cancelled`) : ''}
-    <div class="field"><span>小計</span><span class="amt" data-sub="${i}">${foreign(total, form.model.buy.currency)}</span></div>
+    <div class="field"><span>小計</span><span class="amt" data-sub="${i}">${subText(it)}</span></div>
   </div></div>`;
 }
 
@@ -1303,6 +1312,7 @@ function validateForm() {
   if (form.kind === 'buy') {
     if (!m.items.some((i) => i.name || C.num(i.price))) return '至少要有一個品項';
     if (m.items.some((i) => (i.name || C.num(i.price)) && !i.groupId)) return '每個品項都要選團';
+    if (m.items.some((i) => C.num(i.cod) > C.itemTotal(Object.assign({}, i, { cancelled: false })))) return '貨付＋不能比這個品項的金額還大';
   } else if (form.kind === 'sell') {
     if (!C.num(m.amount)) return '金額要填';
   } else if (!C.num(m.amount)) return '金額要填';
@@ -1319,7 +1329,7 @@ function saveForm() {
     // 貨付：取貨那天才付錢；先到貨再補上付款日
     if (buy.payMethod === '貨付') buy.paidDate = buy.arrival === '已到' ? (buy.arrivedDate || todayStr()) : '';
     if (buy.arrival === '已到' && !buy.arrivedDate) buy.arrivedDate = todayStr();
-    const items = m.items.filter((i) => i.name || C.num(i.price)).map((i) => Object.assign({}, i, { price: C.num(i.price), qty: C.num(i.qty) || 1 }));
+    const items = m.items.filter((i) => i.name || C.num(i.price)).map((i) => Object.assign({}, i, { price: C.num(i.price), qty: C.num(i.qty) || 1, cod: i.cod === '' || i.cod == null ? '' : C.num(i.cod) }));
     const fees = m.fees.map((f) => Object.assign({}, f, { amount: C.num(f.amount), paidDate: f.paid ? (f.paidDate || '') : '' }));
     buy.paidTwd = C.isTwd(buy.currency) ? '' : (buy.paidTwd === '' ? '' : C.num(buy.paidTwd));
     putBuy(buy, items, fees);
@@ -1351,17 +1361,20 @@ function detailBuy(id) {
     ${sheetTop(buyHeading(b), '關閉')}
     <div class="sheet-body">
       <div class="card">
-        <div class="field"><span>下單日</span><span>${esc(b.date)}</span></div>
+        <div class="field"><span>下單日</span><span>${b.date ? esc(b.date) : '還沒下單'}</span></div>
+        ${(() => { const cod = C.codDue(b, items); return cod ? `<div class="field"><span>貨付＋</span><span>${money(cod)} · ${b.arrival === '已到' ? '已在到貨時付' : '到貨時付'}</span></div>` : ''; })()}
+        ${b.callDate ? `<div class="field"><span>喊單日</span><span>${esc(b.callDate)}</span></div>` : ''}
         <div class="field"><span>付款</span><span>${esc(b.payMethod)}${b.accountId ? ' · ' + esc(nameOf('accounts', b.accountId)) : ''} · ${b.paidDate ? '已付 ' + mmdd(b.paidDate) : '未付'}</span></div>
         <div class="field"><span>到貨</span><span>${esc(b.arrival)}${b.arrivedDate ? ' ' + mmdd(b.arrivedDate) : ''}${b.expectedMonth && b.arrival === '未到' ? ' · 預計 ' + b.expectedMonth : ''}</span></div>
         ${C.isTwd(cur) ? '' : `<div class="field"><span>實付台幣</span><span>${b.paidTwd ? money(b.paidTwd) : '還沒填'}</span></div>`}
         <div class="field"><span>合計</span><span class="amt">${money(buyTotal(b))}</span></div>
         ${b.note ? `<div class="field col"><span>備註</span><span>${esc(b.note)}</span></div>` : ''}
       </div>
-      <div class="card"><h3>品項</h3>${items.map((i) => `<div class="item" style="cursor:default"><div class="main"><div class="t">${esc(i.name || '（未命名）')}</div><div class="s">${C.list(i.flags).map((f) => `<span class="tag warn">${f}</span>`).join('')}${i.cancelled ? '<span class="tag">已取消</span>' : ''}${esc([nameOf('groups', i.groupId), nameOf('releases', i.releaseId), optionName(i.channelId), memberNames(i)].filter(Boolean).join(' · '))}</div></div><div class="amt">${foreign(C.itemTotal(i), cur)}</div></div>`).join('')}</div>
+      <div class="card"><h3>品項</h3>${items.map((i) => `<div class="item" style="cursor:default"><div class="main"><div class="t">${esc(i.name || '（未命名）')}</div><div class="s">${C.codOf(b, i) ? `<span class="tag">貨付＋ ${money(C.codOf(b, i))}</span>` : ''}${C.list(i.flags).map((f) => `<span class="tag warn">${f}</span>`).join('')}${i.cancelled ? '<span class="tag">已取消</span>' : ''}${esc([nameOf('groups', i.groupId), nameOf('releases', i.releaseId), optionName(i.channelId), memberNames(i)].filter(Boolean).join(' · '))}</div></div><div class="amt">${foreign(C.itemTotal(i), cur)}</div></div>`).join('')}</div>
       ${photoStrip(b)}
       ${fees.length ? `<div class="card"><h3>費用</h3>${fees.map((f) => `<div class="item" style="cursor:default"><div class="main"><div class="t">${esc(f.kind)} ${f.paid ? '' : '<span class="tag warn">未付</span>'}</div><div class="s">${esc(f.note || '')}</div></div><div class="amt">${f.amount ? money(f.amount) : '？'}</div>${f.paid ? '' : `<button class="btn small" data-fee-paid="${f.id}">已付</button>`}</div>`).join('')}</div>` : ''}
       <div class="btn-row">
+        ${!b.date ? '<button class="btn" data-quick="ordered">標示已下單（今天）</button>' : ''}
         ${!b.paidDate && b.payMethod !== '貨付' ? '<button class="btn" data-quick="paid">標示已付款</button>' : ''}
         ${b.arrival === '未到' ? '<button class="btn" data-quick="arrived">標示已到貨</button>' : ''}
       </div>
@@ -1602,6 +1615,7 @@ let detailId = null;
 
 function formClick(t, d) {
   const m = form.model;
+  if (t.hasAttribute('data-no-order')) { const b = form.model.buy; b.date = b.date ? '' : todayStr(); return refreshForm(); }
   if (t.hasAttribute('data-unknown-paid')) { const b = form.model.buy; b.paidDate = b.paidDate === C.UNKNOWN_DATE ? '' : C.UNKNOWN_DATE; return refreshForm(); }
   if (t.hasAttribute('data-more')) { state.addMore = !state.addMore; return refreshForm(); }
   if (t.hasAttribute('data-add-item')) { m.items.push(emptyItem(m.items[m.items.length - 1])); return refreshForm(); }
@@ -1657,6 +1671,7 @@ function detailClick(t, d) {
   if (!d.quick) return;
   if (isBuy) {
     const b = idx().buys[id];
+    if (d.quick === 'ordered') patchBuy(id, { date: todayStr() });
     if (d.quick === 'paid') patchBuy(id, { paidDate: todayStr() });
     if (d.quick === 'arrived') patchBuy(id, { arrival: '已到', arrivedDate: todayStr(), paidDate: b.payMethod === '貨付' ? todayStr() : b.paidDate });
     if (d.quick === 'cancel') { if (!confirm('這張單標成已取消？取消後不會計入花費。')) return; patchBuy(id, { arrival: '已取消' }); }
