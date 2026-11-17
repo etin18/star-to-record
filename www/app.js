@@ -8,12 +8,14 @@
 'use strict';
 
 const C = window.Calc;
-const FRONT_VERSION = 'v8';
-const BACKEND_NEEDED = 4;   // 前端需要的最低後端版本（v2 照片、v3 喊單日、v4 品項的多付／二補與費用的「一起寄」）
-const ENTITIES = ['groups', 'members', 'releases', 'accounts', 'parties', 'options', 'buys', 'buyItems', 'buyFees', 'sells', 'expenses'];
+const FRONT_VERSION = 'v9';
+const BACKEND_NEEDED = 5;   // 前端需要的最低後端版本（v2 照片、v3 喊單日、v4 多付／二補與一起寄、v5 ㄒㄈㄨ 分頁）
+const TRINKET_BACKEND = 5;  // ㄒㄈㄨ 要後端 v5 才有分頁可以存
+const ENTITIES = ['groups', 'members', 'releases', 'accounts', 'parties', 'options', 'buys', 'buyItems', 'buyFees', 'sells', 'expenses', 'trinkets'];
 const FLAGS = ['多帶', '重複', '自留'];
 const PAY_BUY = ['匯款', '貨付', '刷卡', '現金'];
 const PAY_SELL = ['匯款', '取貨付款', '現金'];
+const PAY_TRINKET = ['現金', '刷卡', '匯款', '貨付'];
 const ARRIVAL = ['未到', '已到', '已取消'];
 const SHIP_STATUS = ['未寄', '已寄', '已取貨'];
 const FEE_KINDS = ['運費', '包手', '匯款手續費', '刷卡手續費', '整單二補', '其他'];
@@ -37,9 +39,11 @@ const jsonGet = (k, d) => { try { return JSON.parse(lsGet(k, '')) || d; } catch 
 const KIND_ICONS = {
   buy: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8h14l-1 12H6z"/><path d="M9 8a3 3 0 0 1 6 0"/></svg>',
   sell: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l9-9h8v8l-9 9z"/><circle cx="15.5" cy="8.5" r="1.2"/></svg>',
-  expense: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h15a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4z"/><path d="M4 6l11-3v3"/><circle cx="16.5" cy="13" r="1.2"/></svg>'
+  expense: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h15a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4z"/><path d="M4 6l11-3v3"/><circle cx="16.5" cy="13" r="1.2"/></svg>',
+  // ㄒㄈㄨ＝扭蛋殼
+  trinket: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M4 12h16"/><circle cx="12" cy="12" r="2"/></svg>'
 };
-const KIND_LABEL = { buy: '買單', sell: '賣單', expense: '花費' };
+const KIND_LABEL = { buy: '買單', sell: '賣單', expense: '花費', trinket: 'ㄒㄈㄨ' };
 
 const ICONS = {
   home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>',
@@ -65,8 +69,8 @@ const state = {
   collapsed: Object.assign({ parties: true }, jsonGet('sl.collapsed', {})),   // 設定頁哪些清單收起來；對象會越來越多，預設收合
   period: 'month',          // 報表：month／all
   month: todayStr().slice(0, 7),
-  filter: { kinds: ['buy', 'sell', 'expense'], groupId: '', memberId: '', accountId: '', partyId: '', flag: '', q: '', month: todayStr().slice(0, 7), allTime: true },
-  sync: { status: jsonGet('sl.data', null) ? 'idle' : 'idle', backend: '', error: '' }
+  filter: { kinds: ['buy', 'sell', 'expense', 'trinket'], groupId: '', memberId: '', accountId: '', partyId: '', flag: '', q: '', month: todayStr().slice(0, 7), allTime: true },
+  sync: { status: 'idle', backend: lsGet('sl.backend', ''), error: '' }   // 後端版本記在手機：沒網路時也知道後端夠不夠新
 };
 ENTITIES.forEach((e) => { state.data[e] = []; });
 Object.assign(state.data, jsonGet('sl.data', {}));
@@ -210,7 +214,7 @@ async function call(payload) {
     body: JSON.stringify(Object.assign({ secret: state.secret }, payload))
   });
   const json = await res.json();
-  if (json.apiVersion) state.sync.backend = json.apiVersion;
+  if (json.apiVersion) { state.sync.backend = json.apiVersion; lsSet('sl.backend', json.apiVersion); }
   if (!json.ok) {
     const err = new Error(json.error || '後端回應失敗');
     err.auth = !!json.authError;
@@ -250,7 +254,8 @@ async function pull() {
   setSync('syncing');
   try {
     const json = await call({ action: 'list' });
-    ENTITIES.forEach((e) => { state.data[e] = json[e] || []; });
+    // 後端沒回傳的資料表（舊後端還沒有那個分頁）保留手機上的，不要當成空的蓋掉
+    ENTITIES.forEach((e) => { if (Array.isArray(json[e])) state.data[e] = json[e]; });
     normalizeData();
     saveLocal();
     setSync('ok');
@@ -536,7 +541,7 @@ async function refreshPhotoStats() {
     photoStats.bytes = all.reduce((n, p) => n + ((p.value.full && p.value.full.size) || 0) + ((p.value.thumb && p.value.thumb.size) || 0), 0);
     const have = new Set(all.map((p) => p.id));
     const wanted = new Set();
-    ['buys', 'sells', 'expenses'].forEach((e) => state.data[e].forEach((r) => C.list(r.photoIds).forEach((id) => wanted.add(id))));
+    ['buys', 'sells', 'expenses', 'trinkets'].forEach((e) => state.data[e].forEach((r) => C.list(r.photoIds).forEach((id) => wanted.add(id))));
     photoStats.missing = [...wanted].filter((id) => !have.has(id)).length;
   } catch (e) { /* 私密瀏覽等沒有 IndexedDB 的情況 */ }
   if (sheets.some((x) => x.id === 'settings')) refreshSheets();
@@ -650,7 +655,7 @@ async function exportBackup() {
   try {
     const photos = (await PhotoDB.all()).filter((p) => p.value);
     const owners = {};
-    [['buys', 'buy'], ['sells', 'sell'], ['expenses', 'expense']].forEach(([e, kind]) => state.data[e].forEach((r) => C.list(r.photoIds).forEach((id) => { owners[id] = { kind, r }; })));
+    [['buys', 'buy'], ['sells', 'sell'], ['expenses', 'expense'], ['trinkets', 'trinket']].forEach(([e, kind]) => state.data[e].forEach((r) => C.list(r.photoIds).forEach((id) => { owners[id] = { kind, r }; })));
 
     const entries = [];
     const items = [];
@@ -715,7 +720,7 @@ async function importBackup(file) {
       (incoming.buyItems || []).forEach((i) => { if (newBuys.has(i.buyId) && !have.buyItems.has(i.id)) { state.data.buyItems.push(i); newBuys.get(i.buyId).items.push(i); } });
       (incoming.buyFees || []).forEach((f) => { if (newBuys.has(f.buyId) && !have.buyFees.has(f.id)) { state.data.buyFees.push(f); newBuys.get(f.buyId).fees.push(f); } });
       newBuys.forEach(({ buy, items, fees }) => state.outbox.push({ action: 'saveBuy', buy, items, fees }));
-      ['groups', 'members', 'releases', 'accounts', 'parties', 'options', 'sells', 'expenses'].forEach((e) => {
+      ['groups', 'members', 'releases', 'accounts', 'parties', 'options', 'sells', 'expenses', 'trinkets'].forEach((e) => {
         (incoming[e] || []).forEach((r) => {
           if (!r || !r.id || have[e].has(r.id)) return;
           state.data[e].push(r); recordsAdded++;
@@ -876,7 +881,8 @@ function viewHome() {
 
   const recent = [...state.data.buys.map((b) => ({ d: b.date || b.callDate, html: histRow('buy', b) })),
     ...state.data.sells.map((s) => ({ d: s.date, html: histRow('sell', s) })),
-    ...state.data.expenses.map((e) => ({ d: e.date, html: histRow('expense', e) }))]
+    ...state.data.expenses.map((e) => ({ d: e.date, html: histRow('expense', e) })),
+    ...state.data.trinkets.map((x) => ({ d: x.date, html: histRow('trinket', x) }))]
     .sort((a, b) => String(b.d).localeCompare(String(a.d))).slice(0, 5);
 
   const first = !state.data.groups.length && !state.data.buys.length;
@@ -904,6 +910,9 @@ function histRow(kind, r) {
   if (kind === 'sell') {
     return `<div class="item" data-act="sell" data-id="${r.id}">${head}<div class="main">${label}<div class="t wrap">${esc(r.content || r.partyName || '（未填內容）')}</div><div class="s">${photoTag(r)}${esc(joinDot(r.content && (r.partyName || '（未填買家）'), mmdd(r.date), r.paidDate ? '已收款' : '未收款', r.shipStatus))}</div></div><div class="amt in">${money(r.amount, true)}</div></div>`;
   }
+  if (kind === 'trinket') {
+    return `<div class="item" data-act="trinket" data-id="${r.id}">${head}<div class="main">${label}<div class="t wrap">${esc(r.content || 'ㄒㄈㄨ')}</div><div class="s">${photoTag(r)}${esc(joinDot(mmdd(r.date), r.payMethod))}</div></div><div class="amt out">${money(-r.amount)}</div></div>`;
+  }
   return `<div class="item" data-act="expense" data-id="${r.id}">${head}<div class="main">${label}<div class="t wrap">${esc(r.content || r.category || '')}</div><div class="s">${photoTag(r)}${esc(joinDot(r.content && r.category, mmdd(r.date)))}</div></div><div class="amt out">${money(-r.amount)}</div></div>`;
 }
 const photoTag = (r) => (C.list(r.photoIds).length ? `<span class="tag">照片 ${C.list(r.photoIds).length}</span>` : '');   // 標籤放在文字前面：後面的文字太長被截掉時，標籤才不會跟著不見
@@ -913,7 +922,7 @@ const photoTag = (r) => (C.list(r.photoIds).length ? `<span class="tag">照片 $
    ========================================================================== */
 const drafts = {};   // 記一筆頁的草稿，各種類各一份：切換種類或分頁時不會丟掉打到一半的內容
 function newDraft(kind) {
-  const model = kind === 'buy' ? newBuy() : kind === 'sell' ? newSell() : newExpense();
+  const model = kind === 'buy' ? newBuy() : kind === 'sell' ? newSell() : kind === 'trinket' ? newTrinket() : newExpense();
   return { kind, editing: false, inline: true, model };
 }
 function viewAdd() {
@@ -922,9 +931,9 @@ function viewAdd() {
   if (form && !form.inline) return '';
   drafts[state.addKind] = drafts[state.addKind] || newDraft(state.addKind);
   form = drafts[state.addKind];
-  const kinds = [['buy', '買單'], ['sell', '賣單'], ['expense', '花費']];
+  const kinds = [['buy', '買單'], ['sell', '賣單'], ['expense', '花費'], ['trinket', 'ㄒㄈㄨ']];
   return `<div class="seg" style="margin-top:6px">${kinds.map(([k, l]) => `<button data-addkind="${k}" class="${state.addKind === k ? 'on' : ''}">${l}</button>`).join('')}</div>`
-    + ({ buy: buyFormHtml, sell: sellFormHtml, expense: expenseFormHtml })[form.kind]();
+    + FORM_HTML[form.kind]();
 }
 
 /* ==========================================================================
@@ -963,6 +972,9 @@ function viewReport() {
     <div class="card"><h3>多帶</h3>
       <div class="item" style="cursor:default"><div class="main"><div class="t">被搭售的不熱門成員卡</div><div class="s">${period ? '這個月' : '累積'}共 ${multi.count} 張</div></div><div class="amt out">${money(multi.amount)}</div></div>
       <div class="item" style="cursor:default"><div class="main"><div class="t">手上可以賣或換的</div><div class="s">已到貨的多帶 ${spare['多帶']} 張 · 重複 ${spare['重複']} 張</div></div></div>
+    </div>
+    <div class="card"><h3>ㄒㄈㄨ <small class="hint">無用小物總計，不算入追星花費</small></h3>
+      ${(() => { const x = C.trinketSum(state.data, period); return `<div class="field"><span>${period ? '這個月' : '全部'} ${x.count} 筆</span><span class="amt out">${money(x.total)}</span></div>`; })()}
     </div>
     <div class="card"><h3>帳戶進出</h3>
       ${accountIds.length ? accountIds.map((id) => `<div class="item" style="cursor:default"><div class="main"><div class="t">${esc(nameOf('accounts', id))}</div><div class="s">出 ${money(flows[id].out)} · 進 ${money(flows[id].in)}</div></div><div class="amt">${money(flows[id].in - flows[id].out, true)}</div></div>`).join('') : '<p class="hint">記買單、賣單時選了帳戶，這裡就會有進出。</p>'}
@@ -1018,6 +1030,15 @@ function applyFilter() {
       rows.push({ kind: 'expense', d: e.date, r: e, amount: -e.amount });
     });
   }
+  if (f.kinds.includes('trinket')) {
+    state.data.trinkets.forEach((x) => {
+      if (!inMonth(x.date)) return;
+      if (f.accountId && x.accountId !== f.accountId) return;
+      if (f.partyId || f.flag || f.groupId || f.memberId) return;   // ㄒㄈㄨ 沒有對象、團、成員、標記
+      if (q && ![x.content, x.note, x.payMethod].join(' ').toLowerCase().includes(q)) return;
+      rows.push({ kind: 'trinket', d: x.date, r: x, amount: -x.amount });
+    });
+  }
   return rows.sort((a, b) => String(b.d).localeCompare(String(a.d)));
 }
 
@@ -1027,23 +1048,26 @@ const sel = (name, cur, options, blank) => `<select data-filter="${name}">${blan
 function historyResultsHtml() {
   const rows = applyFilter();
   const paid = C.paidByBuy(state.data);
-  let buy = 0, sell = 0, exp = 0;
+  let buy = 0, sell = 0, exp = 0, trk = 0;
   rows.forEach((x) => {
     if (x.kind === 'buy') buy -= paid[x.r.id] || 0;
-    else if (x.kind === 'sell') sell += x.amount; else exp += x.amount;
+    else if (x.kind === 'sell') sell += x.amount;
+    else if (x.kind === 'trinket') trk += x.amount;
+    else exp += x.amount;
   });
   return `
     <div class="card"><h3>本期小計</h3>
       <div class="field"><span>買單</span><span class="amt">${money(buy)}</span></div>
       <div class="field"><span>賣單</span><span class="amt in">${money(sell, true)}</span></div>
       <div class="field"><span>花費</span><span class="amt">${money(exp)}</span></div>
+      <div class="field"><span>ㄒㄈㄨ</span><span class="amt">${money(trk)}</span></div>
       <p class="hint" style="margin-top:4px">只算真的付出去、收進來的錢：還沒付的、取消的單不算，賣單要收到錢才算。</p></div>
     <div class="card">${rows.length ? rows.map((x) => histRow(x.kind, x.r)).join('') : '<p class="hint">這段期間沒有符合的紀錄</p>'}</div>`;
 }
 
 function viewHistory() {
   const f = state.filter;
-  const kinds = [['buy', '買單'], ['sell', '賣單'], ['expense', '花費']];
+  const kinds = [['buy', '買單'], ['sell', '賣單'], ['expense', '花費'], ['trinket', 'ㄒㄈㄨ']];
 
   return `
     <div class="card" style="margin-top:6px">
@@ -1375,6 +1399,31 @@ function expenseFormHtml() {
     </div>`;
 }
 
+/* ---------- ㄒㄈㄨ：姊姊自己亂花錢的紀錄（扭蛋、捏捏、玩偶…），跟追星無關 ---------- */
+function newTrinket() { return { id: '', date: todayStr(), content: '', amount: '', payMethod: '現金', accountId: '', note: '', photoIds: '' }; }
+/** 有連試算表、但後端還沒有 ㄒㄈㄨ 分頁：先不給存，不然存了進不去，下次同步就不見 */
+const trinketBlocked = () => !!state.apiUrl && Number(String(state.sync.backend || 'v0').slice(1)) < TRINKET_BACKEND;
+function trinketFormHtml() {
+  const m = form.model;
+  const blocked = trinketBlocked();
+  return `
+    ${form.inline ? '' : sheetTop(form.editing ? '編輯 ㄒㄈㄨ' : '記 ㄒㄈㄨ', '取消', blocked ? '' : '存起來')}
+    <div class="${form.inline ? '' : 'sheet-body'}">
+      ${blocked ? '<div class="card warn-card"><h3>後端還沒更新</h3><p class="hint">要先重新部署 Code.gs，試算表才會有「ㄒㄈㄨ」分頁。在那之前先不能記，不然存了會不見。</p></div>' : ''}
+      <div class="card">
+        ${fInput('日期', 'date', 'date')}
+        ${fInput('內容', 'content', 'text', '例如 扭蛋、捏捏、玩偶')}
+        ${fInput('金額', 'amount', 'number')}
+        ${payCombo('付款', 'trinket', m, PAY_TRINKET)}
+      </div>
+      ${photoCard()}
+      <div class="card"><div class="field col"><label>備註</label><textarea data-path="note" rows="2">${esc(m.note)}</textarea></div></div>
+      ${blocked ? '' : '<button class="btn" data-save>存起來</button>'}
+      ${form.editing && !blocked ? `<button class="btn danger" data-delete>刪除這筆 ㄒㄈㄨ</button>` : ''}
+    </div>`;
+}
+const FORM_HTML = { buy: () => buyFormHtml(), sell: () => sellFormHtml(), expense: () => expenseFormHtml(), trinket: () => trinketFormHtml() };
+
 function openForm(kind, existing) {
   if (kind === 'buy') {
     if (existing) {
@@ -1382,9 +1431,9 @@ function openForm(kind, existing) {
       form = { kind, editing: true, model: { buy: Object.assign({}, existing), items: items.map((x) => Object.assign({}, x)), fees: fees.map((x) => Object.assign({}, x)) } };
     } else form = { kind, editing: false, model: newBuy() };
   } else {
-    form = { kind, editing: !!existing, model: existing ? Object.assign({}, existing) : kind === 'sell' ? newSell() : newExpense() };
+    form = { kind, editing: !!existing, model: existing ? Object.assign({}, existing) : kind === 'sell' ? newSell() : kind === 'trinket' ? newTrinket() : newExpense() };
   }
-  openSheet('form', () => ({ buy: buyFormHtml, sell: sellFormHtml, expense: expenseFormHtml })[form.kind]());
+  openSheet('form', () => FORM_HTML[form.kind]());
 }
 
 /** 新增選項時要問的名字；回傳 null 代表取消 */
@@ -1415,8 +1464,8 @@ function validateForm() {
     if (!m.items.some((i) => i.name || C.num(i.price))) return '至少要有一個品項';
     if (m.items.some((i) => (i.name || C.num(i.price)) && !i.groupId)) return '每個品項都要選團';
     if (m.items.some((i) => C.num(i.extra) < 0 || C.num(i.second) < 0)) return '多付、二補不能是負的';
-  } else if (form.kind === 'sell') {
-    if (!C.num(m.amount)) return '金額要填';
+  } else if (form.kind === 'trinket' && trinketBlocked()) {
+    return '後端還沒更新，ㄒㄈㄨ 先不能記';
   } else if (!C.num(m.amount)) return '金額要填';
   return '';
 }
@@ -1442,6 +1491,8 @@ function saveForm() {
     s.partyName = nameOf('parties', s.partyId, s.partyName);
     if (s.payMethod === '取貨付款') s.paidDate = s.shipStatus === '已取貨' ? (s.paidDate || todayStr()) : '';
     put('sells', s);
+  } else if (form.kind === 'trinket') {
+    put('trinkets', Object.assign({}, m, { amount: C.num(m.amount), accountId: m.payMethod === '匯款' ? m.accountId : '' }));
   } else {
     put('expenses', Object.assign({}, m, { amount: C.num(m.amount) }));
   }
@@ -1797,6 +1848,7 @@ document.addEventListener('click', async (ev) => {
   if (d.act === 'buy') { detailId = d.id; return openSheet('detail', () => detailBuy(d.id)); }
   if (d.act === 'sell') { detailId = d.id; return openSheet('detail', () => detailSell(d.id)); }
   if (d.act === 'expense') return openForm('expense', state.data.expenses.find((e) => e.id === d.id));
+  if (d.act === 'trinket') return openForm('trinket', state.data.trinkets.find((x) => x.id === d.id));
   if (d.act === 'group') return openSheet('group', () => groupSheet(d.id));
   if (d.act === 'collection') return openSheet('collection', () => collectionSheet(d.id));
   if (d.act === 'edit-group') return openSheet('group-edit', () => editGroupSheet(d.id));
@@ -1832,7 +1884,7 @@ document.addEventListener('click', async (ev) => {
       const groups = [...new Set(buyParts(id).fees.filter((f) => f.shipId).map((f) => f.shipId))].map((sid) => [sid, shipTotal(sid)]);
       delBuy(id);
       groups.forEach(([sid, total]) => resplitShip(sid, total));
-    } else del(form.kind === 'sell' ? 'sells' : 'expenses', form.model.id);
+    } else del({ sell: 'sells', expense: 'expenses', trinket: 'trinkets' }[form.kind], form.model.id);
     form = null; closeSheet('form'); closeSheet('detail'); render(); return toast('已刪除');
   }
 
@@ -2044,7 +2096,7 @@ function onFieldChange(ev) {
     } else {
       const [method, id] = el.value.split(':');
       target.payMethod = method; target.accountId = id || '';
-      if (method === '貨付' || method === '取貨付款') target.paidDate = '';
+      if ((method === '貨付' || method === '取貨付款') && 'paidDate' in target) target.paidDate = '';
     }
     return refreshForm();
   }

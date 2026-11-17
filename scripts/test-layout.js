@@ -53,7 +53,8 @@ const SEED = {
     { id: 'f2', buyId: 'b1', kind: '運費', amount: 9876543, paid: true, paidDate: iso(-1), note: '一起寄', shipId: 'sh1' },
     { id: 'f3', buyId: 'b2', kind: '運費', amount: 9876543, paid: true, paidDate: iso(-1), note: '一起寄', shipId: 'sh1' }],
   sells: [{ id: 's1', date: iso(-4), partyId: 'p1', partyName: LONG + '買家', content: LONG, groupId: 'gA', amount: 9876543, payMethod: '匯款', accountId: 'a1', paidDate: '', shipMethod: '賣貨便', shipStatus: '未寄' }],
-  expenses: [{ id: 'e1', date: iso(-2), category: '演唱會', content: LONG, amount: 1234567, accountId: 'a1', groupId: 'gA' }]
+  expenses: [{ id: 'e1', date: iso(-2), category: '演唱會', content: LONG, amount: 1234567, accountId: 'a1', groupId: 'gA' }],
+  trinkets: [{ id: 't1', date: iso(-1), content: LONG, amount: 7654321, payMethod: '匯款', accountId: 'a1', note: LONG, photoIds: 'ph1' }]
 };
 
 const THEMES = ['light', 'dark', 'glow'];
@@ -124,6 +125,7 @@ function scan() {
         ['記一筆-賣家搜尋清單開著', async () => { await page.click('[data-tab="add"]'); await page.click('[data-addkind="buy"]'); await page.click('[data-pcombo="buy.partyId"]'); }],
         ['記一筆-賣單', async () => { await page.click('[data-addkind="sell"]'); }],
         ['記一筆-花費', async () => { await page.click('[data-addkind="expense"]'); }],
+        ['記一筆-ㄒㄈㄨ', async () => { await page.click('[data-addkind="trinket"]'); }],
         ['報表-單月', async () => { await page.click('[data-tab="report"]'); await page.click('[data-period="month"]'); }],
         ['報表-全部', async () => { await page.click('[data-tab="report"]'); await page.click('[data-period="all"]'); }],
         ['明細', async () => { await page.click('[data-tab="history"]'); }],
@@ -135,6 +137,8 @@ function scan() {
         ['買單大圖', async () => { await page.click('.sheet .thumb'); await page.waitForTimeout(120); }],
         ['買單編輯（長資料、七張照片）', async () => { await page.click('.sheet[data-sheet="pv"] [data-close]'); await page.click('[data-quick="edit"]'); }],
         ['一起到貨', async () => { await page.click('.sheet [data-close]'); await page.click('[data-tab="home"]'); await page.click('[data-ship-open]'); await page.click('[data-ship-pick="b1"]'); await page.click('[data-ship-pick="b2"]'); await page.fill('[data-ship="amount"]', '9876543'); }],
+        // 前面「明細-選了團」篩了團，ㄒㄈㄨ 不屬於任何團會被篩掉，先清掉篩選
+        ['ㄒㄈㄨ編輯', async () => { await page.click('.sheet [data-close]'); await page.click('[data-tab="history"]'); await page.selectOption('[data-filter="groupId"]', ''); await page.click('[data-act="trinket"][data-id="t1"]'); }],
         ['賣單詳細', async () => { await page.click('.sheet [data-close]'); await page.click('[data-tab="home"]'); await page.click('[data-act="sell"][data-id="s1"]'); }],
         ['團明細', async () => { await page.click('.sheet [data-close]'); await page.click('[data-tab="report"]'); await page.click('[data-act="group"][data-id="gA"]'); }],
         ['收集表', async () => { await page.click('[data-act="collection"][data-id="r1"]'); }]

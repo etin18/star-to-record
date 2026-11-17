@@ -9,6 +9,7 @@
    - 已取消的買單整張不算；品項全部取消的單也一樣（連運費等費用都不算）
    - 一起寄的超商運費是取貨時付現金，不算進任何帳戶
    - 外幣單以「實付台幣」為準；還沒填就用匯率先估（data.rates，1 台幣＝多少外幣）
+   - ㄒㄈㄨ（姊姊自己亂花錢的紀錄：扭蛋、捏捏、玩偶…）跟追星無關，不算進任何追星的數字，另外用 trinketSum 算
    ========================================================================== */
 (function (root) {
   'use strict';
@@ -157,6 +158,18 @@
     });
     res.total = res.transfer + res.pickup + res.cash;
     return res;
+  }
+
+  /** ㄒㄈㄨ 的總額與筆數。period：'YYYY-MM' 只算那個月；null 算全部 */
+  function trinketSum(data, period) {
+    let total = 0;
+    let count = 0;
+    (data.trinkets || []).forEach((t) => {
+      if (period && ym(t.date) !== period) return;
+      total += num(t.amount);
+      count++;
+    });
+    return { total, count };
   }
 
   /** 每張買單實際付出去多少（商品款＋已付的費用，不分日期）。明細的小計用，跟報表同一套規則 */
@@ -381,7 +394,7 @@
   const api = {
     UNKNOWN_DATE, CURRENCIES, SYMBOLS, isTwd, list, num, ym, index,
     itemUnit, itemTotal, itemsSum, splitEven, buyGoods, estimateTwd, isEstimated, feesSum, isCancelled, isVoid,
-    events, paidByBuy, dueSummary, receivable, summary, monthly, accountFlows, allocations,
+    events, paidByBuy, dueSummary, receivable, trinketSum, summary, monthly, accountFlows, allocations,
     byGroup, groupDetail, multiSpend, spareCounts, collection, todos
   };
 

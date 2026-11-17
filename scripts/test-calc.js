@@ -280,6 +280,18 @@ ok('待收：賣單還沒收到的錢，依收款方式分開', () => {
   assert.equal(r.count, 2);
 });
 
+ok('ㄒㄈㄨ 另外算：有自己的總額，不算進任何追星的數字', () => {
+  const d = Object.assign({}, data, { trinkets: [
+    { id: 't1', date: '2026-10-08', content: '扭蛋', amount: 100, payMethod: '現金' },
+    { id: 't2', date: '2026-10-20', content: '捏捏', amount: 250, payMethod: '匯款', accountId: 'a1' },
+    { id: 't3', date: '2026-09-02', content: '玩偶', amount: 480, payMethod: '刷卡' }] });
+  assert.deepEqual(C.trinketSum(d, '2026-10'), { total: 350, count: 2 });
+  assert.deepEqual(C.trinketSum(d, null), { total: 830, count: 3 });
+  assert.equal(C.summary(d, '2026-10').spend, C.summary(data, '2026-10').spend);        // 追星花費不變
+  assert.equal(C.accountFlows(d, '2026-10').a1.out, C.accountFlows(data, '2026-10').a1.out);
+  assert.deepEqual(C.byGroup(d, null), C.byGroup(data, null));
+});
+
 ok('還沒下單：有喊單日、沒下單日，只出現在「還沒下單」', () => {
   const d = { buys: [{ id: 'n1', callDate: '2026-10-01', date: '', payMethod: '匯款', currency: 'TWD', arrival: '未到' },
                      { id: 'n2', callDate: '', date: '', payMethod: '匯款', currency: 'TWD', arrival: '未到' }],

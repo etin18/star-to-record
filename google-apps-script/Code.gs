@@ -11,7 +11,7 @@
  *
  * 分頁會在第一次呼叫時自動建立：
  *   團、成員、回歸、帳戶、對象、選項（通路／寄送方式／花費類別）、
- *   買單、買單品項、買單費用、賣單、花費
+ *   買單、買單品項、買單費用、賣單、花費、ㄒㄈㄨ
  *
  * ★★ 通關密語 ★★
  *   把下面的 SECRET 改成你自己的一組密語，再到 App 設定填入「同一組」。
@@ -23,7 +23,7 @@
 var SECRET = '';   // ← 改成你自己的通關密語
 
 /** 後端版本。App 設定頁會跟自己的版本並排顯示，用來確認有沒有真的重新部署。 */
-var API_VERSION = 'v4';
+var API_VERSION = 'v5';
 
 /* ==========================================================================
    資料表定義：欄位順序＝試算表欄位順序
@@ -180,6 +180,21 @@ var SHEETS = {
       { key: 'accountId', header: '付款帳戶id', type: 'text', width: 250 },
       { key: 'groupId', header: '團id', type: 'text', width: 250 },
       { key: 'memberId', header: '成員id', type: 'text', width: 250 },
+      { key: 'note', header: '備註', type: 'text', width: 200 },
+      { key: 'createdAt', header: '建立時間', type: 'text' },
+      { key: 'photoIds', header: '照片', type: 'text', width: 200 }
+    ]
+  },
+  // ㄒㄈㄨ：姊姊自己亂花錢的紀錄（扭蛋、捏捏、玩偶…），跟追星無關，報表另外算
+  trinkets: {
+    sheetName: 'ㄒㄈㄨ',
+    fields: [
+      { key: 'id', header: 'id', type: 'text', width: 250 },
+      { key: 'date', header: '日期', type: 'date' },
+      { key: 'content', header: '內容', type: 'text', width: 240 },
+      { key: 'amount', header: '金額', type: 'number' },
+      { key: 'payMethod', header: '付款方式', type: 'text' },
+      { key: 'accountId', header: '付款帳戶id', type: 'text', width: 250 },
       { key: 'note', header: '備註', type: 'text', width: 200 },
       { key: 'createdAt', header: '建立時間', type: 'text' },
       { key: 'photoIds', header: '照片', type: 'text', width: 200 }

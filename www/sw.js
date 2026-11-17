@@ -7,7 +7,7 @@
 
 // 改動 www/ 裡的檔案後記得把版號 +1，
 // 否則手機會一直吃舊快取，看不到新版
-const VERSION = 'v22';
+const VERSION = 'v24';
 const CACHE = `star-ledger-${VERSION}`;
 
 // 本機開發時完全不走快取：改了檔案重整就要看得到，
@@ -22,11 +22,8 @@ const SHELL = [
   'app.js',
   'calc.js',
   'manifest.webmanifest',
-  // 照片主題的底圖。進 SHELL 是為了離線也有底 ——
-  // 少了它整個主題會變成純深綠色塊，玻璃沒有東西可以透
-  'bg-haze.webp',
-  'bg-forest.jpg',
-  'bg-pink.jpg',
+  // 只能放真的存在的檔案：少一個，整批 addAll 就失敗，Service Worker 裝不起來
+  // （以前這裡列了三張不存在的底圖，所以一直沒裝成功，離線也開不起來）
   'icons/icon-180.png',
   'icons/icon-192.png',
   'icons/icon-512.png',

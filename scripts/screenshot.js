@@ -63,7 +63,8 @@ const SEED = {
     { id: 's1', date: iso(-4), partyId: 'p2', partyName: '買家小美', content: '成員甲專卡 ×3', groupId: 'gA', amount: 120, payMethod: '匯款', accountId: 'a2', paidDate: '', shipMethod: '賣貨便', shipStatus: '未寄' },
     { id: 's2', date: iso(-6), partyId: 'p2', partyName: '買家小美', content: '空專', groupId: 'gA', amount: 90, payMethod: '匯款', accountId: 'a2', paidDate: iso(-5), shipMethod: '面交', shipStatus: '未寄' }
   ],
-  expenses: [{ id: 'e1', date: iso(-2), category: '演唱會', content: '門票', amount: 3800, accountId: 'a1', groupId: 'gB' }]
+  expenses: [{ id: 'e1', date: iso(-2), category: '演唱會', content: '門票', amount: 3800, accountId: 'a1', groupId: 'gB' }],
+  trinkets: [{ id: 't1', date: iso(-1), content: '扭蛋（虛構）', amount: 100, payMethod: '現金', accountId: '', note: '' }]
 };
 
 // 匯率不連真的網路：固定 1 台幣＝40 韓元，結果才穩定
@@ -278,6 +279,34 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   await shot('11-記花費');
   await page.click('button.btn[data-save]');
   check('花費存起來了', (await page.evaluate(() => window.__sl.state.data.expenses.length)) === 2);
+
+  /* ----- ㄒㄈㄨ：自己亂花的錢，另外算 ----- */
+  const spendBefore = await page.evaluate(() => window.Calc.summary(window.__sl.state.data, null).spend);
+  await page.click('[data-tab="add"]');
+  await page.click('[data-addkind="trinket"]');
+  await page.waitForSelector('[data-path="content"]');
+  check('記一筆有第四種「ㄒㄈㄨ」，欄位只有日期、內容、金額、付款、照片、備註', await page.evaluate(() => {
+    const paths = [...document.querySelectorAll('#view [data-path]')].map((e) => e.dataset.path).sort().join(',');
+    return paths === 'amount,content,date,note' && !!document.querySelector('#view [data-paycombo="trinket"]') && !!document.querySelector('#view [data-add-photo]');
+  }));
+  await page.fill('[data-path="content"]', '捏捏（虛構）');
+  await page.fill('[data-path="amount"]', '250');
+  await page.selectOption('[data-paycombo="trinket"]', '匯款:a1');
+  await shot('24-記ㄒㄈㄨ');
+  await page.click('button.btn[data-save]');
+  check('ㄒㄈㄨ 存起來了（匯款・銀行甲）', await page.evaluate(() => window.__sl.state.data.trinkets.some((x) => x.amount === 250 && x.payMethod === '匯款' && x.accountId === 'a1')));
+  check('ㄒㄈㄨ 不算進追星的花費', (await page.evaluate(() => window.Calc.summary(window.__sl.state.data, null).spend)) === spendBefore);
+  await page.click('[data-tab="report"]');
+  await page.click('[data-period="all"]');
+  check('報表有 ㄒㄈㄨ 自己一格：全部 2 筆 $350', (await text()).replace(/\s+/g, ' ').includes('全部 2 筆 −$350') || /全部 2 筆\s*\$350/.test(await text()));
+  await page.click('[data-tab="history"]');
+  check('明細有 ㄒㄈㄨ 的列和小計', (await page.locator('.kk.trinket').count()) === 2 && (await page.textContent('#hist-results')).includes('ㄒㄈㄨ'));
+  await page.locator('.item[data-act="trinket"]', { hasText: '捏捏' }).click();
+  await page.waitForSelector('.sheet [data-path="content"]');
+  check('點 ㄒㄈㄨ 那一列可以編輯', (await page.inputValue('.sheet [data-path="content"]')) === '捏捏（虛構）');
+  page.once('dialog', (dl) => dl.accept());
+  await page.click('.sheet [data-delete]');
+  check('ㄒㄈㄨ 可以刪掉', await page.evaluate(() => window.__sl.state.data.trinkets.length === 1));
 
   /* ----- 照片：加、看大圖、刪、取消、打包、匯入 ----- */
   const makePng = async (color) => page.evaluate(async (c) => {
@@ -497,6 +526,23 @@ const check = (name, ok) => { checks.push([name, ok]); console.log(ok ? '  ✓' 
   await page3.click('button.btn[data-save]');
   check('新賣單的寄送方式存的是名字「面交」', await page3.evaluate(() => window.__sl.state.data.sells.some((s) => s.amount === 150 && s.shipMethod === '面交')));
   await ctx3.close();
+
+  /* ----- 後端還是 v4（沒有 ㄒㄈㄨ 分頁）：先不給記，同步也不會把手機上的 ㄒㄈㄨ 清掉 ----- */
+  const ctx4 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await stubRates(ctx4);
+  const fakeApi = 'https://example.invalid/exec';
+  const listV4 = Object.assign({ ok: true, apiVersion: 'v4' }, ...['groups', 'members', 'releases', 'accounts', 'parties', 'options', 'buys', 'buyItems', 'buyFees', 'sells', 'expenses'].map((k) => ({ [k]: SEED[k] || [] })));
+  await ctx4.route(fakeApi, (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(listV4) }));
+  const page4 = await ctx4.newPage();
+  page4.on('pageerror', (e) => errors.push('[舊後端頁] ' + String(e)));
+  await page4.addInitScript(([sd, api]) => { if (!localStorage.getItem('sl.data')) { localStorage.setItem('sl.data', JSON.stringify(sd)); localStorage.setItem('sl.api', api); } }, [SEED, fakeApi]);
+  await page4.goto(BASE);
+  await page4.waitForFunction(() => window.__sl.state.sync.backend === 'v4');
+  check('舊後端同步後，手機上的 ㄒㄈㄨ 沒有被清掉', await page4.evaluate(() => window.__sl.state.data.trinkets.length === 1));
+  await page4.click('[data-tab="add"]');
+  await page4.click('[data-addkind="trinket"]');
+  check('舊後端時 ㄒㄈㄨ 表單提醒要先更新、沒有存的按鈕', (await page4.evaluate(() => document.body.innerText)).includes('後端還沒更新') && (await page4.locator('#view button.btn[data-save]').count()) === 0);
+  await ctx4.close();
 
   console.log('\nconsole 錯誤：', errors.length ? '\n' + errors.join('\n') : '無');
   const failed = checks.filter((c) => !c[1]);
